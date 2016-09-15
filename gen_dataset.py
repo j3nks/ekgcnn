@@ -1,5 +1,6 @@
 import io
 import os
+import random
 import sys
 import time
 
@@ -11,24 +12,24 @@ import numpy as np
 import pywfdb
 from math import ceil, floor
 from PIL import Image
+from tqdm import *
 
 gen_signals = True
 gen_images = True
+gen_test = False
 pre_ann = 1.1  # Time to capture before annotation in seconds
 post_ann = 1.1  # Time to capture after annotation in seconds
 img_pixels = 256
 nb_classes = 4
 nb_rows = 30000
-signal_list = []
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 def main():
-    buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
-    file_num = 0
 
-    signal_list = sys.argv[2:]
-
-    path_db = r'C:/mitdb/db/{}/'.format(sys.argv[1])
-    path_images = r'C:/mitdb/images/{}/'.format(sys.argv[1])
+    db_name = sys.argv[1]
+    path_db = r'C:/mitdb/db/{}/'.format(db_name)
+    path_images = r'C:/mitdb/images/{}/'.format(db_name)
 
     # Create directory to store images
     if not os.path.exists(path_images):
@@ -40,102 +41,41 @@ def main():
         if f.endswith(".dat"):
             files.append(f.split('.')[0])
 
-    num_beats, max_sample, num_signals, sig_map, class_map, record_map = get_record_info(path_db, files)
+    print('Compiling beat info into databases...\n\n')
+    num_beats, max_sample, sig_per_rec, sig_map, class_map, beat_map = get_db_info(path_db, files)
 
-    # Write results from get_record_info
-    record_info_to_csv(path_images, num_beats, max_sample, num_signals, sig_map, class_map, record_map)
+    print(' Writing beat info to CSV file...\n\n')
+    db_info_to_csv(path_images, num_beats, max_sample, sig_map, class_map)
 
-    prog_bar = ProgressBar(total_beats=num_beats, num_recs=len(files))
+    print('Creating balanced datasets...\n\n')
+    x_train, y_train, sig_train, x_test, y_test, sig_test = get_balanced_dataset(path_db, path_images, beat_map, max_sample, img_pixels, gen_test)
 
-    csv = open(path_images + 'db_images.csv', 'wb')
-    csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
+    print('Compressing datasets...\n\n')
+    if gen_test:
+        if gen_images:
+            np.savez_compressed('{}images_{}'.format(path_images, db_name), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
-    img_cnt = 0
-    # ------------------------------------------------------------------------------------------------------------------
-    for key, value in sig_map.iteritems():
+        if gen_signals:
+            np.savez_compressed('{}signals_{}'.format(path_images, db_name), x_train=sig_train, y_train=sig_train, x_test=sig_test, y_test=sig_test)
+    else:
+        if gen_images:
+            np.savez_compressed('{}images_{}'.format(path_images, db_name), x_train=x_train, y_train=y_train)
 
-        if len(signal_list) > 0:
-            if key == 'rec_list' or key not in signal_list:
-                continue
-        else:
-            if key == 'rec_list':
-                continue
-
-        if img_cnt == 0 or img_cnt > nb_rows:
-
-            if img_cnt > nb_rows:
-                img_cnt = 0
-                for sig_name in rec.signal_names:
-                    if gen_images:
-                        np.savez_compressed('{}images_{}_{}'.format(path_images, sig_name, img_cnt / nb_rows),
-                                            images=images, labels=labels)
-
-                    if gen_signals:
-                        np.savez_compressed('{}signals_{}_{}'.format(path_images, sig_name, img_cnt / nb_rows),
-                                            images=signals, labels=labels)
-
-            # Create directory to store images
-            path_signal = '{}{}{}/'.format(path_images, key, img_cnt / nb_rows)
-
-            if not os.path.exists(path_signal):
-                os.makedirs(path_signal)
-
-            # Preallocate the memory for all images
-            images = np.empty((nb_rows, img_pixels ** 2), dtype=np.float32)
-            labels = np.empty((nb_rows, nb_classes), dtype=np.float32)
-            signals = np.empty((nb_rows, max_sample['len']), dtype=np.float32)
-
-        for rec_idx, record in enumerate(value['rec_list']):
-            path_record = path_db + record
-            rec = pywfdb.Record(path_record)
-
-            #Read in the entire patients EKG
-            signal = rec.read(key)
-
-            for beat_idx, beat in enumerate(record_map[record][key]['beats']):
-                img_cnt += 1
-
-                # Create the data points to plot
-                # t = xrange(start, end)
-                y = signal[beat.start:beat.end]
-
-                # Print CSV file
-                csv.write('{},{},{},{},[{}{}{}{}]\n'.format(img_cnt, record, key, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
-
-                im, im_row = signal_to_image(buf, img_pixels, y)
-
-                if gen_images:
-                    images[img_cnt] = im_row / 255
-                    im.save('{}{}_{}_{}_{}{}'.format(path_signal, img_cnt, record, key, beat.lbl_char, '.png'))
-
-                if gen_signals:
-                    signals[img_cnt] = pad_signal(y, max_sample['len'])
-
-                labels[img_cnt] = beat.lbl_onehot
-
-                im.close()
-
-                #prog_bar.print_progress(rec_idx, beat_idx)
-
-        # Save as numpy array 1 image/signal per row
-        for sig_name in rec.signal_names:
-            if gen_images:
-                np.savez_compressed('{}images_{}'.format(path_images, sig_name), images=sig_map[sig_name]['images'], labels=sig_map[sig_name]['labels'])
-
-            if gen_signals:
-                np.savez_compressed('{}signals_{}'.format(path_images, sig_name), images=sig_map[sig_name]['signals'], labels=sig_map[sig_name]['labels'])
-
-    # Free memory
-    del images
-    del labels
-    del signals
-
-    print '\nData set ' + str(rec_idx + 1) + ' complete!'
-
-    buf.close()
+        if gen_signals:
+            np.savez_compressed('{}signals_{}'.format(path_images, db_name), x_train=sig_train, y_train=sig_train)
 
 
-def record_info_to_csv(path_images, num_beats, max_sample, num_signals, sig_map, class_map, record_map):
+# ----------------------------------------------------------------------------------------------------------------------
+def db_info_to_csv(path_images, num_beats, max_sample, sig_map, class_map):
+    """
+    Writes database info to a CSV file.
+    :param path_images:
+    :param num_beats:
+    :param max_sample:
+    :param sig_map:
+    :param class_map:
+    :return:
+    """
     csv = open(path_images + 'db_breakdown.csv', 'wb')
     csv.write('Total Beats\n')
     csv.write(',{}\n'.format(num_beats))
@@ -161,7 +101,15 @@ def record_info_to_csv(path_images, num_beats, max_sample, num_signals, sig_map,
     csv.close()
 
 
+# ----------------------------------------------------------------------------------------------------------------------
 def signal_to_image(image_buffer, img_pixels, signal):
+    """
+
+    :param image_buffer:
+    :param img_pixels:
+    :param signal:
+    :return:
+    """
 
     # Create image from matplotlib
     fig = plt.figure(figsize=(1, 1), dpi=img_pixels, frameon=False)
@@ -192,53 +140,7 @@ def signal_to_image(image_buffer, img_pixels, signal):
     return im, im_row
 
 
-class ProgressBar:
-
-    def __init__(self, rec_idx=0, num_recs=0, ann_idx=0, num_anns=0, total_beats=0, start_time=time.time(), ann_count=0):
-        self.rec_idx = rec_idx
-        self.num_recs = num_recs
-        self.ann_idx = ann_idx
-        self.num_anns = num_anns
-        self.start_time = start_time
-        self.ann_count = ann_count
-
-        if total_beats > 0:
-            self.total_beats = total_beats
-        else:
-            self.total_beats = self.num_anns * self.num_recs
-
-    def print_progress(self, rec_idx, ann_idx):
-        """
-        Prints progress bar.
-        :param rec_idx: The index of the current record being processed.
-        :param ann_idx: The index of the current annotation being processed.
-        :return:
-        """
-        self.ann_cnt += 1
-
-        # Only printing progress bar for the current record.
-        if ann_idx % (self.num_anns / 26) == 0:
-            completed_tot = float(self.ann_cnt) / self.total_beats
-            completed_rec = float(self.ann_cnt) / (self.num_anns * self.num_recs)
-            elapsed_time = time.time() - self.start_time
-            hashes = '#' * int(completed_rec * 50)
-
-        elif self.ann_cnt == 1:
-            completed_tot = float(self.ann_cnt) / self.total_beats
-            elapsed_time = time.time() - self.start_time
-            hashes = ' ' * 49
-
-        print '\rRecord[{0:02}/{1}][{2:49s}] Total {3:.1f}% | Est. Time Remaining: {4:.2f}(Min)'.format(
-            rec_idx + 1,
-            self.num_recs,
-            hashes,
-            completed_tot * 100,
-            ((elapsed_time / completed_tot) - elapsed_time) / 60,
-        ),
-
-
 # ----------------------------------------------------------------------------------------------------------------------
-# Helper Class
 class Beat:
     """Class that holds all info for a specific type of signal."""
 
@@ -252,11 +154,114 @@ class Beat:
         self.lbl_onehot = lbl_onehot
 
     def to_string(self):
-        return '{},{},{},{}'.format(self.rec_name, self.sig_name, self.ann_idx, self.start, self.end, self.lbl_char, self.lbl_onehot)
+        return '{},{},{},{},{},{},{}'.format(self.rec_name, self.sig_name, self.ann_idx, self.start, self.end, self.lbl_char, self.lbl_onehot)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_balanced_dataset(path_db, path_images, beat_map, max_sample, img_pixels, gen_test=False):
+    """
+
+    :param path_db:
+    :param beat_map:
+    :param max_sample:
+    :param img_pixels:
+    :param gen_test:
+    :return:
+    """
+    sample_len = [len(beat_map['N']), len(beat_map['S']), len(beat_map['V']), len(beat_map['F'])]
+    sample_len.sort()
+
+    nb_labels = sample_len[2]  #TODO: Might have to adjust this if smallest class is very small so oversampling is more realistic.
+
+    random_beats = {}
+    for key in beat_map:
+        if len(beat_map[key]) > nb_labels:
+            random_beats[key] = set(random.sample(list(beat_map[key]), nb_labels))  #TODO: Change this to garantee beats from each patient.
+        else:
+            random_beats[key] = beat_map[key]
+
+    nb_test_labels = 0
+    x_test = None
+    y_test = None
+    sig_test = None
+    if gen_test:
+        # Generate Test Dataset
+        nb_test_labels = int(sample_len[0] * 0.3)  # Reserve 30% TODO: Probably should move magic number to global so can be easily adjustable.
+        x_test, y_test, sig_test, random_beats = get_balanced_dataset_helper(path_db, path_images, random_beats, img_pixels, nb_test_labels, max_sample)
+
+    # Generate Training Dataset
+    nb_train_labels = nb_labels - nb_test_labels
+    x_train, y_train, sig_train, random_beats = get_balanced_dataset_helper(path_db, path_images, random_beats, img_pixels, nb_train_labels, max_sample)
+
+    return x_train, y_train, sig_train, x_test, y_test, sig_test, beat_map
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_balanced_dataset_helper(path_db, path_images, beat_map, img_pixels, nb_labels, max_sample):
+    """
+
+    :param path_db:
+    :param path_images:
+    :param beat_map:
+    :param img_pixels:
+    :param nb_labels:
+    :param max_sample:
+    :return:
+    """
+    buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
+
+    csv = open(path_images + 'db_images.csv', 'wb')
+    csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
+
+    # Preallocate memory
+    beats = [None] * (nb_labels * len(beat_map))
+    x = np.empty((nb_labels * len(beat_map), img_pixels ** 2), dtype=np.float32)
+    y = np.empty((nb_labels * len(beat_map), len(beat_map)), dtype=np.float32)
+    signals = np.empty((nb_labels * len(beat_map), max_sample['len']), dtype=np.float32)
+
+    for cnt in xrange(nb_labels):
+        for idx, key in enumerate(beat_map): # TODO: This may need to be randomized.
+            beats[cnt * 4 + idx] = beat_map[key].pop()
+
+    beats.sort(key=lambda b: b.rec_name)
+
+    record = ''
+    for idx, beat in tqdm(beats):
+        if beat.rec_name != record:
+            record = beat.rec_name
+            path_record = path_db + record
+            rec = pywfdb.Record(path_record)
+
+        # Read in the signal from the record.
+        signal = rec.read(beat.sig_name, beat.start, beat.stop)
+
+        # Convert to image
+        im, im_row = signal_to_image(buf, img_pixels, signal)
+
+        # Assign the signal to dataset
+        if gen_images:
+            x[idx] = im_row / 255
+            im.save('{}{}_{}_{}_{}{}'.format(path_images, idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+
+        if gen_signals:
+            signals[idx] = pad_signal(y, max_sample['len'])
+
+        y[idx] = beat.lbl_onehot
+
+        # Print to CSV file
+        csv.write('{},{},{},{},[{}{}{}{}]\n'.format(idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
+        im.close()
+
+    x, y = random.shuffle(x, y, random_state=rng_seed)
+
+    buf.close()
+
+    return x, y, signals, beat_map
+
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Helper functions
-def get_record_info(path_db, rec_list):
+def get_db_info(path_db, rec_list):
     """
     Gets stats on each record. i.e. Beat count.
     :param rec_list:
@@ -267,10 +272,11 @@ def get_record_info(path_db, rec_list):
     sig_map = {}
     class_map = {}
     record_map = {}
+    beat_map = {}
     max_sample = {'idx': 0, 'len': 0, 'rec': '', 'lbl': ''}
 
-    for rec_str in rec_list:
-        rec = pywfdb.Record(path_db + rec_str)
+    for rec_name in tqdm(rec_list):
+        rec = pywfdb.Record(path_db + rec_name)
         annotations = rec.annotation().read()
 
         if num_signals < len(rec.signal_names):
@@ -310,68 +316,67 @@ def get_record_info(path_db, rec_list):
             if total_samples > max_sample['len']:
                 max_sample['idx'] = ann_idx
                 max_sample['len'] = total_samples
-                max_sample['rec'] = rec_str
+                max_sample['rec'] = rec_name
                 max_sample['lbl'] = get_annotation_char(ann)
 
-            img_class = get_annotation_char(ann)
+            lbl = get_annotation_char(ann)
 
             # Index where annotation occurs
-            ann_sig_index = ann.time
+            ann_time = ann.time
 
             # Calculate start index of image
             start = 0
-            if pre_samples != 0 and ann_sig_index - pre_samples >= 0:
-                start = ann_sig_index - pre_samples
+            if pre_samples != 0 and ann_time - pre_samples >= 0:
+                start = ann_time - pre_samples
 
             for sig_idx, sig_name in enumerate(rec.signal_names):
 
                 beat_cnt += 1
 
-                if rec_str not in record_map:
+                if rec_name not in record_map:
                     # Read in the entire patients EKG
                     signal_len = len(rec.read(sig_name))
-                    record_map[rec_str] = {sig_name: {'len': signal_len, 'beats': set()}}
-                elif sig_name not in record_map[rec_str]:
+                    record_map[rec_name] = {sig_name: signal_len}
+                elif sig_name not in record_map[rec_name]:
+                    # Read in the entire patients EKG
                     signal_len = len(rec.read(sig_name))
-                    record_map[rec_str][sig_name] = {'len': signal_len, 'beats': set()}
-                    record_map[rec_str][sig_name]['len'] = signal_len
+                    record_map[rec_name][sig_name] = signal_len
                 else:
-                    signal_len = record_map[rec_str][sig_name]['len']
+                    signal_len = record_map[rec_name][sig_name]
 
                 if sig_idx < 1:
                     # Calculate end index of image
                     end = signal_len - 1
-                    if post_samples != 0 and ann_sig_index + post_samples < signal_len:
-                        end = ann_sig_index + post_samples
+                    if post_samples != 0 and ann_time + post_samples < signal_len:
+                        end = ann_time + post_samples
 
-                beat = Beat(rec_str, sig_name, ann_idx, start, end, img_class, get_annotation_onehot(ann))
+                beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl, get_annotation_onehot(ann))
 
-                record_map[rec_str][sig_name]['beats'].add(beat)
+                if lbl not in beat_map:
+                    beat_map[lbl] = set()
+                    beat_map[lbl].add(beat)
+                else:
+                    beat_map[lbl].add(beat)
 
                 if sig_name not in sig_map:
-                    sig_map[sig_name] = {img_class: set(), 'rec_list': set()}
-                    sig_map[sig_name][img_class].add(beat)
-                    sig_map[sig_name]['rec_list'].add(rec_str)
+                    sig_map[sig_name] = {lbl: set()}
+                    sig_map[sig_name][lbl].add(beat)
+                elif lbl not in sig_map[sig_name]:
+                    sig_map[sig_name][lbl] = set()
+                    sig_map[sig_name][lbl].add(beat)
                 else:
-                    if img_class not in sig_map[sig_name]:
-                        sig_map[sig_name][img_class] = set()
-                        sig_map[sig_name][img_class].add(beat)
-                    else:
-                        sig_map[sig_name][img_class].add(beat)
+                    sig_map[sig_name][lbl].add(beat)
 
-                    if rec_str not in sig_map[sig_name]['rec_list']:
-                        sig_map[sig_name]['rec_list'].add(rec_str)
-
-                if img_class not in class_map:
-                    class_map[img_class] = {sig_name: set()}
-                    class_map[img_class][sig_name].add(beat)
-                elif sig_name not in class_map[img_class]:
-                    class_map[img_class][sig_name] = set()
-                    class_map[img_class][sig_name].add(beat)
+                if lbl not in class_map:
+                    class_map[lbl] = {sig_name: set()}
+                    class_map[lbl][sig_name].add(beat)
+                elif sig_name not in class_map[lbl]:
+                    class_map[lbl][sig_name] = set()
+                    class_map[lbl][sig_name].add(beat)
                 else:
-                    class_map[img_class][sig_name].add(beat)
+                    class_map[lbl][sig_name].add(beat)
 
-    return beat_cnt, max_sample, num_signals, sig_map, class_map, record_map
+    return beat_cnt, max_sample, num_signals, sig_map, class_map, beat_map
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -422,3 +427,4 @@ def pad_signal(sig, sig_len):
 # ----------------------------------------------------------------------------------------------------------------------
 if __name__ == '__main__':
     main()
+
