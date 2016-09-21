@@ -143,9 +143,9 @@ def get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test,
 
     nb_rows = nb_beats[2]
 
-    # 50000 total beats will fit into 16GB of memory ok.
-    if nb_rows > 50000.0 / len(lbl_map):
-        nb_rows = 50000.0 / len(lbl_map)
+    # 40000 total beats will fit into 16GB of memory ok.
+    if nb_rows > 40000.0 / len(lbl_map):
+        nb_rows = 40000.0 / len(lbl_map)
 
     nb_test_rows = 0
     x_test = None
@@ -240,12 +240,13 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
     csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
 
     # Preallocate memory
-    x = np.empty((nb_rows * len(lbl_map), img_pixels ** 2), dtype=np.float32)
-    y = np.empty((nb_rows * len(lbl_map), len(lbl_map)), dtype=np.float32)
+    x = np.empty((int(nb_rows * len(lbl_map)), int(img_pixels ** 2)), dtype=np.float32)
+    y = np.empty((int(nb_rows * len(lbl_map)), len(lbl_map)), dtype=np.float32)
     signals = None
 
     if gen_signals:
-        signals = np.empty((nb_rows * len(lbl_map), 1000), dtype=np.float32)
+        max_samples = sorted(max_samples, key=lambda x: x['len'], reverse=True)
+        signals = np.empty((int(nb_rows * len(lbl_map)), max_samples[0]['len']), dtype=np.float32)
 
     print('Generating images/signals...')
     if percent_test < 1:
@@ -383,10 +384,10 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
 
                 beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl_char, get_annotation_onehot(ann))
                 beats.append(beat)
-                beat_idx  = len(beats) - 1
+                beat_idx = len(beats) - 1
 
                 if pre_samples >= max_sample or post_samples >= max_sample:
-                    max_samples.append({'ann_idx': ann_idx, 'pre': pre_samples, 'post': post_samples, 'rec': rec_name, 'lbl': lbl_char, 'beat_idx': beat_idx})
+                    max_samples.append({'ann_idx': ann_idx, 'len': end - start, 'pre': pre_samples, 'post': post_samples, 'rec': rec_name, 'sig': sig_name, 'lbl': lbl_char, 'beat_idx': beat_idx})
 
                 if lbl_char not in lbl_map:
                     lbl_map[lbl_char] = {'beats': set(), 'records': {}, 'signals': {}}
