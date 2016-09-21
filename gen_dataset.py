@@ -2,30 +2,30 @@ import io
 import os
 import random
 import sys
-import time
 
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pywfdb
+from collections import deque
 from math import ceil, floor
 from PIL import Image
 from tqdm import *
+from sklearn.utils import shuffle
 
-gen_signals = True
-gen_images = True
-gen_test = False
-pre_ann = 1.1  # Time to capture before annotation in seconds
-post_ann = 1.1  # Time to capture after annotation in seconds
-img_pixels = 256
-nb_classes = 4
-nb_rows = 30000
-
-
+rng_seed = 1337
+random.seed(rng_seed)
+np.random.seed(seed=rng_seed)
 # ----------------------------------------------------------------------------------------------------------------------
 def main():
+    gen_signals = False
+    gen_images = False
+    gen_test = False
+    pre_ann = 1.1  # Time to capture before annotation in seconds
+    post_ann = 1.1  # Time to capture after annotation in seconds
+    img_pixels = 256
+    percent_test = 0.3
 
     db_name = sys.argv[1]
     path_db = r'C:/mitdb/db/{}/'.format(db_name)
@@ -41,64 +41,25 @@ def main():
         if f.endswith(".dat"):
             files.append(f.split('.')[0])
 
-    print('Compiling beat info into databases...\n\n')
-    num_beats, max_sample, sig_per_rec, sig_map, class_map, beat_map = get_db_info(path_db, files)
+    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, pre_ann, post_ann)
 
-    print(' Writing beat info to CSV file...\n\n')
-    db_info_to_csv(path_images, num_beats, max_sample, sig_map, class_map)
+    db_info_to_csv(path_images, sig_map, lbl_map, max_samples, beats)
 
-    print('Creating balanced datasets...\n\n')
-    x_train, y_train, sig_train, x_test, y_test, sig_test = get_balanced_dataset(path_db, path_images, beat_map, max_sample, img_pixels, gen_test)
+    x_train, y_train, sig_train, x_test, y_test, sig_test = get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test, img_pixels, gen_images, gen_signals, gen_test)
 
-    print('Compressing datasets...\n\n')
+    print('Compressing datasets...')
     if gen_test:
         if gen_images:
-            np.savez_compressed('{}images_{}'.format(path_images, db_name), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
+            np.savez_compressed('{}images_{}_train_test'.format(path_images, db_name), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
         if gen_signals:
-            np.savez_compressed('{}signals_{}'.format(path_images, db_name), x_train=sig_train, y_train=sig_train, x_test=sig_test, y_test=sig_test)
+            np.savez_compressed('{}signals_{}_train_test'.format(path_images, db_name), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
     else:
         if gen_images:
-            np.savez_compressed('{}images_{}'.format(path_images, db_name), x_train=x_train, y_train=y_train)
+            np.savez_compressed('{}images_{}_train'.format(path_images, db_name), x_train=x_train, y_train=y_train)
 
         if gen_signals:
-            np.savez_compressed('{}signals_{}'.format(path_images, db_name), x_train=sig_train, y_train=sig_train)
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-def db_info_to_csv(path_images, num_beats, max_sample, sig_map, class_map):
-    """
-    Writes database info to a CSV file.
-    :param path_images:
-    :param num_beats:
-    :param max_sample:
-    :param sig_map:
-    :param class_map:
-    :return:
-    """
-    csv = open(path_images + 'db_breakdown.csv', 'wb')
-    csv.write('Total Beats\n')
-    csv.write(',{}\n'.format(num_beats))
-
-    csv.write('Max Sample\n')
-    csv.write(',Index,{}\n'.format(max_sample['idx']))
-    csv.write(',Length,{}\n'.format(max_sample['len']))
-    csv.write(',Record,{}\n'.format(max_sample['rec']))
-    csv.write(',Label,{}\n'.format(max_sample['lbl']))
-
-    csv.write('Signals\n')
-    for sig in sig_map:
-        csv.write(',{}\n'.format(sig))
-        for lbl in sig_map[sig]:
-            csv.write(',,{},{}\n'.format(lbl, len(sig_map[sig][lbl])))
-
-    csv.write('Classes\n')
-    for lbl in class_map:
-        csv.write(',{}\n'.format(lbl))
-        for sig in class_map[lbl]:
-            csv.write(',,{},{}\n'.format(sig, len(class_map[lbl][sig])))
-
-    csv.close()
+            np.savez_compressed('{}signals_{}_train'.format(path_images, db_name), x_train=sig_train, y_train=y_train)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -158,82 +119,153 @@ class Beat:
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_balanced_dataset(path_db, path_images, beat_map, max_sample, img_pixels, gen_test=False):
+def get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test, img_pixels, gen_images, gen_signals, gen_test):
     """
 
     :param path_db:
-    :param beat_map:
-    :param max_sample:
+    :param path_images:
+    :param lbl_map:
+    :param beats:
+    :param max_samples:
+    :param percent_test:
     :param img_pixels:
+    :param gen_images:
+    :param gen_signals:
     :param gen_test:
     :return:
     """
-    sample_len = [len(beat_map['N']), len(beat_map['S']), len(beat_map['V']), len(beat_map['F'])]
-    sample_len.sort()
 
-    nb_labels = sample_len[2]  #TODO: Might have to adjust this if smallest class is very small so oversampling is more realistic.
+    nb_beats = [0] * len(lbl_map);
+    for idx, lbl_char in enumerate(lbl_map):
+        nb_beats[idx] = len(lbl_map[lbl_char]['beats'])
 
-    random_beats = {}
-    for key in beat_map:
-        if len(beat_map[key]) > nb_labels:
-            random_beats[key] = set(random.sample(list(beat_map[key]), nb_labels))  #TODO: Change this to garantee beats from each patient.
-        else:
-            random_beats[key] = beat_map[key]
+    nb_beats.sort()
 
-    nb_test_labels = 0
+    nb_rows = nb_beats[2]
+
+    # 50000 total beats will fit into 16GB of memory ok.
+    if nb_rows > 50000.0 / len(lbl_map):
+        nb_rows = 50000.0 / len(lbl_map)
+
+    nb_test_rows = 0
     x_test = None
     y_test = None
     sig_test = None
     if gen_test:
         # Generate Test Dataset
-        nb_test_labels = int(sample_len[0] * 0.3)  # Reserve 30% TODO: Probably should move magic number to global so can be easily adjustable.
-        x_test, y_test, sig_test, random_beats = get_balanced_dataset_helper(path_db, path_images, random_beats, img_pixels, nb_test_labels, max_sample)
+        nb_test_rows = int(nb_beats[0] * percent_test)  # TODO: Probably should move magic number to global so can be easily adjustable.
+        x_test, y_test, sig_test, lbl_map, beats = get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_test_rows, percent_test, max_samples, gen_images, gen_signals)
 
     # Generate Training Dataset
-    nb_train_labels = nb_labels - nb_test_labels
-    x_train, y_train, sig_train, random_beats = get_balanced_dataset_helper(path_db, path_images, random_beats, img_pixels, nb_train_labels, max_sample)
+    nb_train_rows = nb_rows - nb_test_rows
+    x_train, y_train, sig_train, lbl_map, beats = get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_train_rows, 1.0, max_samples, gen_images, gen_signals)
 
-    return x_train, y_train, sig_train, x_test, y_test, sig_test, beat_map
+    return x_train, y_train, sig_train, x_test, y_test, sig_test
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_balanced_dataset_helper(path_db, path_images, beat_map, img_pixels, nb_labels, max_sample):
+def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_rows, percent_test, max_samples, gen_images, gen_signals):
     """
-
+    Create a balanced set of beats with even distribution across all records.
     :param path_db:
     :param path_images:
-    :param beat_map:
+    :param lbl_map:
+    :param beats:
     :param img_pixels:
-    :param nb_labels:
-    :param max_sample:
+    :param nb_rows:
+    :param percent_test:
+    :param max_samples:
+    :param gen_images:
+    :param gen_signals:
     :return:
     """
+
+    print('Creating balanced datasets...')
+    balanced_indices = {}
+    for lbl_char in lbl_map:  # Get balanced data for all classes.
+        balanced_indices[lbl_char] = deque(maxlen=nb_rows)
+        if len(lbl_map[lbl_char]['beats']) < nb_rows:  # We must not delete from pool until oversampling is finished.
+            percent_sample = 1.0
+            oversampled = deque()
+            while len(balanced_indices[lbl_char]) < nb_rows:  # Ensure we fill the class with all samples.
+                if len(lbl_map[lbl_char]['beats']) > nb_rows - len(balanced_indices[lbl_char]):
+                    percent_sample = 1.0 - (len(balanced_indices[lbl_char]) / float(nb_rows))
+
+                for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                    for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+
+                        samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_sample)))
+                        balanced_indices[lbl_char].extend(samples)
+                        oversampled.extend(samples)
+
+            # It's ok to remove used samples from pool after finishing oversampling.
+            oversampled = set(oversampled)
+            for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+                    lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(oversampled)
+                    lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(oversampled)
+
+            lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(oversampled)
+
+        else:  # Don't have to do any oversampling.
+            percent_sample = float(nb_rows) / len(lbl_map[lbl_char]['beats'])
+            if percent_test < 1:  # Generating a test set
+                percent_sample *= percent_test
+
+            for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+                    samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_test)))
+
+                    balanced_indices[lbl_char].extend(samples)
+
+                    # We must remove samples from pool so they are not reused.
+                    lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(samples)
+                    lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(samples)
+                    lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(samples)
+
+    # Convert indices to beats and remove all used beats.
+    np_beats = np.array(beats)
+    balanced_beats = deque()
+    for lbl in balanced_indices:
+        balanced_beats.extend(np_beats[balanced_indices[lbl]])
+        np.delete(np_beats, balanced_indices[lbl])
+
+    # Sort the beats by record name.
+    balanced_beats = list(balanced_beats)
+    balanced_beats.sort(key=lambda b: b.rec_name)
+
     buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
 
     csv = open(path_images + 'db_images.csv', 'wb')
     csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
 
     # Preallocate memory
-    beats = [None] * (nb_labels * len(beat_map))
-    x = np.empty((nb_labels * len(beat_map), img_pixels ** 2), dtype=np.float32)
-    y = np.empty((nb_labels * len(beat_map), len(beat_map)), dtype=np.float32)
-    signals = np.empty((nb_labels * len(beat_map), max_sample['len']), dtype=np.float32)
+    x = np.empty((nb_rows * len(lbl_map), img_pixels ** 2), dtype=np.float32)
+    y = np.empty((nb_rows * len(lbl_map), len(lbl_map)), dtype=np.float32)
+    signals = None
 
-    for cnt in xrange(nb_labels):
-        for idx, key in enumerate(beat_map): # TODO: This may need to be randomized.
-            beats[cnt * 4 + idx] = beat_map[key].pop()
+    if gen_signals:
+        signals = np.empty((nb_rows * len(lbl_map), 1000), dtype=np.float32)
 
-    beats.sort(key=lambda b: b.rec_name)
+    print('Generating images/signals...')
+    if percent_test < 1:
+        # Create directory to store images
+        if not os.path.exists(path_images + 'test/'):
+            os.makedirs(path_images + 'test/')
+    else:
+        # Create directory to store images
+        if not os.path.exists(path_images + 'train/'):
+            os.makedirs(path_images + 'train/')
 
     record = ''
-    for idx, beat in tqdm(beats):
+    for idx, beat in enumerate(tqdm(balanced_beats)):
         if beat.rec_name != record:
             record = beat.rec_name
             path_record = path_db + record
             rec = pywfdb.Record(path_record)
 
         # Read in the signal from the record.
-        signal = rec.read(beat.sig_name, beat.start, beat.stop)
+        signal = rec.read(beat.sig_name, beat.start, beat.end - beat.start)
 
         # Convert to image
         im, im_row = signal_to_image(buf, img_pixels, signal)
@@ -241,10 +273,13 @@ def get_balanced_dataset_helper(path_db, path_images, beat_map, img_pixels, nb_l
         # Assign the signal to dataset
         if gen_images:
             x[idx] = im_row / 255
-            im.save('{}{}_{}_{}_{}{}'.format(path_images, idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+            if percent_test < 1:
+                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'test', idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+            else:
+                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'train', idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
 
         if gen_signals:
-            signals[idx] = pad_signal(y, max_sample['len'])
+            signals[idx] = pad_signal(signal, 1000)
 
         y[idx] = beat.lbl_onehot
 
@@ -252,35 +287,35 @@ def get_balanced_dataset_helper(path_db, path_images, beat_map, img_pixels, nb_l
         csv.write('{},{},{},{},[{}{}{}{}]\n'.format(idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
         im.close()
 
-    x, y = random.shuffle(x, y, random_state=rng_seed)
+    x, y = shuffle(x, y, random_state=rng_seed)
 
     buf.close()
 
-    return x, y, signals, beat_map
+    return x, y, signals, lbl_map, beats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Helper functions
-def get_db_info(path_db, rec_list):
+def get_db_info(path_db, rec_list, pre_ann, post_ann):
     """
     Gets stats on each record. i.e. Beat count.
+    :param path_db:
     :param rec_list:
+    :param pre_ann:
+    :param post_ann:
     :return:
     """
-    beat_cnt = 0
-    num_signals = 0
-    sig_map = {}
-    class_map = {}
+    beats = deque()
     record_map = {}
-    beat_map = {}
-    max_sample = {'idx': 0, 'len': 0, 'rec': '', 'lbl': ''}
+    sig_map = {}
+    lbl_map = {}
+    max_sample = 1000
+    max_samples = deque()
 
+    print('Compiling beat info into databases...')
     for rec_name in tqdm(rec_list):
         rec = pywfdb.Record(path_db + rec_name)
         annotations = rec.annotation().read()
-
-        if num_signals < len(rec.signal_names):
-            num_signals = len(rec.signal_names)
 
         for ann_idx, ann in enumerate(annotations):
             if not (1 <= ann.type <= 11 or ann.type == 34):
@@ -311,15 +346,13 @@ def get_db_info(path_db, rec_list):
             pre_samples = int(round(pre_ann * prev_r_r))  # Number samples to capture before annotation
             post_samples = int(round(post_ann * next_r_r))  # Number samples to capture after annotation
 
-            total_samples = pre_samples + post_samples
+            # if pre_samples > max_sample:
+            #     pre_samples = max_sample
+            #
+            # if post_samples > max_sample:
+            #     post_samples = max_sample
 
-            if total_samples > max_sample['len']:
-                max_sample['idx'] = ann_idx
-                max_sample['len'] = total_samples
-                max_sample['rec'] = rec_name
-                max_sample['lbl'] = get_annotation_char(ann)
-
-            lbl = get_annotation_char(ann)
+            lbl_char = get_annotation_char(ann)
 
             # Index where annotation occurs
             ann_time = ann.time
@@ -331,52 +364,109 @@ def get_db_info(path_db, rec_list):
 
             for sig_idx, sig_name in enumerate(rec.signal_names):
 
-                beat_cnt += 1
-
                 if rec_name not in record_map:
                     # Read in the entire patients EKG
-                    signal_len = len(rec.read(sig_name))
-                    record_map[rec_name] = {sig_name: signal_len}
+                    rec_len = len(rec.read(sig_name))
+                    record_map[rec_name] = {sig_name: rec_len}
                 elif sig_name not in record_map[rec_name]:
                     # Read in the entire patients EKG
-                    signal_len = len(rec.read(sig_name))
-                    record_map[rec_name][sig_name] = signal_len
+                    rec_len = len(rec.read(sig_name))
+                    record_map[rec_name][sig_name] = rec_len
                 else:
-                    signal_len = record_map[rec_name][sig_name]
+                    rec_len = record_map[rec_name][sig_name]
 
                 if sig_idx < 1:
                     # Calculate end index of image
-                    end = signal_len - 1
-                    if post_samples != 0 and ann_time + post_samples < signal_len:
+                    end = rec_len - 1
+                    if post_samples != 0 and ann_time + post_samples < rec_len:
                         end = ann_time + post_samples
 
-                beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl, get_annotation_onehot(ann))
+                beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl_char, get_annotation_onehot(ann))
+                beats.append(beat)
+                beat_idx  = len(beats) - 1
 
-                if lbl not in beat_map:
-                    beat_map[lbl] = set()
-                    beat_map[lbl].add(beat)
-                else:
-                    beat_map[lbl].add(beat)
+                if pre_samples >= max_sample or post_samples >= max_sample:
+                    max_samples.append({'ann_idx': ann_idx, 'pre': pre_samples, 'post': post_samples, 'rec': rec_name, 'lbl': lbl_char, 'beat_idx': beat_idx})
+
+                if lbl_char not in lbl_map:
+                    lbl_map[lbl_char] = {'beats': set(), 'records': {}, 'signals': {}}
+
+                if rec_name not in lbl_map[lbl_char]['records']:
+                    lbl_map[lbl_char]['records'][rec_name] = {}
+
+                if sig_name not in lbl_map[lbl_char]['records'][rec_name]:
+                    lbl_map[lbl_char]['records'][rec_name][sig_name] = set()
+
+                if sig_name not in lbl_map[lbl_char]['signals']:
+                    lbl_map[lbl_char]['signals'][sig_name] = set()
+
+                lbl_map[lbl_char]['records'][rec_name][sig_name].add(beat_idx)
+                lbl_map[lbl_char]['signals'][sig_name].add(beat_idx)
+                lbl_map[lbl_char]['beats'].add(beat_idx)
 
                 if sig_name not in sig_map:
-                    sig_map[sig_name] = {lbl: set()}
-                    sig_map[sig_name][lbl].add(beat)
-                elif lbl not in sig_map[sig_name]:
-                    sig_map[sig_name][lbl] = set()
-                    sig_map[sig_name][lbl].add(beat)
-                else:
-                    sig_map[sig_name][lbl].add(beat)
+                    sig_map[sig_name] = {'beats': set(), 'records': {}, 'labels': {}}
 
-                if lbl not in class_map:
-                    class_map[lbl] = {sig_name: set()}
-                    class_map[lbl][sig_name].add(beat)
-                elif sig_name not in class_map[lbl]:
-                    class_map[lbl][sig_name] = set()
-                    class_map[lbl][sig_name].add(beat)
-                else:
-                    class_map[lbl][sig_name].add(beat)
+                if rec_name not in sig_map[sig_name]['records']:
+                    sig_map[sig_name]['records'][rec_name] = set()
 
-    return beat_cnt, max_sample, num_signals, sig_map, class_map, beat_map
+                # if lbl_char not in sig_map[sig_name]['records'][rec_name]:
+                #     lbl_map[lbl_char]['records'][rec_name][sig_name] = set()
+
+                if lbl_char not in sig_map[sig_name]['labels']:
+                    sig_map[sig_name]['labels'][lbl_char] = set()
+
+                sig_map[sig_name]['records'][rec_name].add(beat_idx)
+                sig_map[sig_name]['labels'][lbl_char].add(beat_idx)
+                sig_map[sig_name]['beats'].add(beat_idx)
+
+    return sig_map, lbl_map, max_samples, beats
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def db_info_to_csv(path_images, sig_map, lbl_map, max_samples, beats):
+    """
+
+    :param path_images:
+    :param sig_map:
+    :param lbl_map:
+    :param max_samples:
+    :param beats:
+    :return:
+    """
+
+    print('Writing beat info to CSV file...')
+
+    csv = open(path_images + 'db_breakdown.csv', 'wb')
+    csv.write('Total Beats\n')
+    csv.write(',{}\n'.format(len(beats)))
+
+    csv.write('Signals\n')
+    for sig in sig_map:
+        total = 0
+        csv.write(',{}\n'.format(sig))
+        for lbl in sig_map[sig]['labels']:
+            csv.write(',,{},{}\n'.format(lbl, len(sig_map[sig]['labels'][lbl])))
+            total += len(sig_map[sig]['labels'][lbl])
+
+        csv.write(',{},,{}\n\n'.format('Total', total))
+
+    csv.write('Classes\n')
+    for lbl in lbl_map:
+        total = 0
+        csv.write(',{}\n'.format(lbl))
+        for sig in lbl_map[lbl]['signals']:
+            csv.write(',,{},{}\n'.format(sig, len(lbl_map[lbl]['signals'][sig])))
+            total += len(lbl_map[lbl]['signals'][sig])
+
+        csv.write(',{},,{}\n\n'.format('Total', total))
+
+    csv.write('Max Sample\n')
+    csv.write(',ann_idx,pre_samples,post_samples,rec_name,lbl_char,beat_idx\n')
+    for entry in max_samples:
+        csv.write(',{},{},{},{},{},{}\n'.format(entry['ann_idx'], entry['pre'], entry['post'], entry['rec'], entry['lbl'], entry['beat_idx']))
+
+    csv.close()
 
 
 # ----------------------------------------------------------------------------------------------------------------------
