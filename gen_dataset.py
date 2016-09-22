@@ -14,18 +14,20 @@ from PIL import Image
 from tqdm import *
 from sklearn.utils import shuffle
 
-rng_seed = 1337
+rng_seed = 2016
 random.seed(rng_seed)
 np.random.seed(seed=rng_seed)
 # ----------------------------------------------------------------------------------------------------------------------
 def main():
-    gen_signals = False
-    gen_images = False
+    gen_signals = True
+    gen_images = True
     gen_test = False
     pre_ann = 1.1  # Time to capture before annotation in seconds
     post_ann = 1.1  # Time to capture after annotation in seconds
     img_pixels = 256
     percent_test = 0.3
+
+    sig_list = set([x.upper() for x in sys.argv[2:]])
 
     db_name = sys.argv[1]
     path_db = r'C:/mitdb/db/{}/'.format(db_name)
@@ -41,10 +43,16 @@ def main():
         if f.endswith(".dat"):
             files.append(f.split('.')[0])
 
-    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, pre_ann, post_ann)
+    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, sig_list, pre_ann, post_ann)
+
+    if len(sig_map) == 0 or len(lbl_map) == 0:
+        print('No signals found!')
+        exit()
 
     db_info_to_csv(path_images, sig_map, lbl_map, max_samples, beats)
 
+    del sig_map
+    
     x_train, y_train, sig_train, x_test, y_test, sig_test = get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test, img_pixels, gen_images, gen_signals, gen_test)
 
     print('Compressing datasets...')
@@ -114,8 +122,22 @@ class Beat:
         self.lbl_char = lbl_char
         self.lbl_onehot = lbl_onehot
 
-    def to_string(self):
-        return '{},{},{},{},{},{},{}'.format(self.rec_name, self.sig_name, self.ann_idx, self.start, self.end, self.lbl_char, self.lbl_onehot)
+
+# ----------------------------------------------------------------------------------------------------------------------
+class MaxSample:
+    """Class that holds all info for a specific type of signal."""
+
+    def __init__(self, rec_name='', sig_name='', lbl_char='', ann_idx=0, prev_ann_idx=0, next_ann_idx=0, pre_samples=0, post_samples=0, length=0, beat_idx=0):
+        self.rec_name = rec_name
+        self.sig_name = sig_name
+        self.lbl_char = lbl_char
+        self.ann_idx = ann_idx
+        self.prev_ann_idx = prev_ann_idx
+        self.next_ann_idx = next_ann_idx
+        self.pre_samples = pre_samples
+        self.post_samples = post_samples
+        self.length = length
+        self.beat_idx = beat_idx
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -135,7 +157,7 @@ def get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test,
     :return:
     """
 
-    nb_beats = [0] * len(lbl_map);
+    nb_beats = [0] * len(lbl_map)
     for idx, lbl_char in enumerate(lbl_map):
         nb_beats[idx] = len(lbl_map[lbl_char]['beats'])
 
@@ -144,8 +166,8 @@ def get_dataset(path_db, path_images, lbl_map, beats, max_samples, percent_test,
     nb_rows = nb_beats[2]
 
     # 40000 total beats will fit into 16GB of memory ok.
-    if nb_rows > 40000.0 / len(lbl_map):
-        nb_rows = 40000.0 / len(lbl_map)
+    if nb_rows > 60000.0 / len(lbl_map):
+        nb_rows = 60000.0 / len(lbl_map)
 
     nb_test_rows = 0
     x_test = None
@@ -230,9 +252,15 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
         balanced_beats.extend(np_beats[balanced_indices[lbl]])
         np.delete(np_beats, balanced_indices[lbl])
 
-    # Sort the beats by record name.
+    # Convert beats to list for easy sorting.
     balanced_beats = list(balanced_beats)
-    balanced_beats.sort(key=lambda b: b.rec_name)
+
+    # Get max signal length.
+    signals = None
+    if gen_signals:
+        max_samples = sorted(max_samples, key=lambda b: b.length, reverse=True)
+        signal_len = max_samples[0].length
+        signals = np.empty((int(nb_rows * len(lbl_map)), signal_len), dtype=np.float32)
 
     buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
 
@@ -242,11 +270,6 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
     # Preallocate memory
     x = np.empty((int(nb_rows * len(lbl_map)), int(img_pixels ** 2)), dtype=np.float32)
     y = np.empty((int(nb_rows * len(lbl_map)), len(lbl_map)), dtype=np.float32)
-    signals = None
-
-    if gen_signals:
-        max_samples = sorted(max_samples, key=lambda x: x['len'], reverse=True)
-        signals = np.empty((int(nb_rows * len(lbl_map)), max_samples[0]['len']), dtype=np.float32)
 
     print('Generating images/signals...')
     if percent_test < 1:
@@ -257,6 +280,9 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
         # Create directory to store images
         if not os.path.exists(path_images + 'train/'):
             os.makedirs(path_images + 'train/')
+
+    # Sort the beats by record name for optimized image creation.
+    balanced_beats.sort(key=lambda b: b.rec_name)
 
     record = ''
     for idx, beat in enumerate(tqdm(balanced_beats)):
@@ -275,12 +301,12 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
         if gen_images:
             x[idx] = im_row / 255
             if percent_test < 1:
-                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'test', idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'test', beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
             else:
-                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'train', idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+                im.save('{}{}/{}_{}_{}_{}{}'.format(path_images, 'train', beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
 
         if gen_signals:
-            signals[idx] = pad_signal(signal, 1000)
+            signals[idx] = pad_signal(signal, signal_len)
 
         y[idx] = beat.lbl_onehot
 
@@ -291,17 +317,19 @@ def get_balanced_dataset(path_db, path_images, lbl_map, beats, img_pixels, nb_ro
     x, y = shuffle(x, y, random_state=rng_seed)
 
     buf.close()
+    csv.close()
 
     return x, y, signals, lbl_map, beats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Helper functions
-def get_db_info(path_db, rec_list, pre_ann, post_ann):
+def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann):
     """
     Gets stats on each record. i.e. Beat count.
     :param path_db:
     :param rec_list:
+    :param sig_list:
     :param pre_ann:
     :param post_ann:
     :return:
@@ -310,13 +338,17 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
     record_map = {}
     sig_map = {}
     lbl_map = {}
-    max_sample = 1000
+    max_sample = 500
     max_samples = deque()
+    max_beat = MaxSample()
 
     print('Compiling beat info into databases...')
     for rec_name in tqdm(rec_list):
         rec = pywfdb.Record(path_db + rec_name)
         annotations = rec.annotation().read()
+
+        if sig_list.isdisjoint(set(x.strip() for x in rec.signal_names)):
+            continue
 
         for ann_idx, ann in enumerate(annotations):
             if not (1 <= ann.type <= 11 or ann.type == 34):
@@ -347,11 +379,11 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
             pre_samples = int(round(pre_ann * prev_r_r))  # Number samples to capture before annotation
             post_samples = int(round(post_ann * next_r_r))  # Number samples to capture after annotation
 
-            # if pre_samples > max_sample:
-            #     pre_samples = max_sample
-            #
-            # if post_samples > max_sample:
-            #     post_samples = max_sample
+            if pre_samples > max_sample:
+                pre_samples = max_sample
+
+            if post_samples > max_sample:
+                post_samples = max_sample
 
             lbl_char = get_annotation_char(ann)
 
@@ -363,7 +395,10 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
             if pre_samples != 0 and ann_time - pre_samples >= 0:
                 start = ann_time - pre_samples
 
+            end = 0
             for sig_idx, sig_name in enumerate(rec.signal_names):
+                if sig_name.strip() not in sig_list:
+                    continue
 
                 if rec_name not in record_map:
                     # Read in the entire patients EKG
@@ -376,8 +411,7 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
                 else:
                     rec_len = record_map[rec_name][sig_name]
 
-                if sig_idx < 1:
-                    # Calculate end index of image
+                if end == 0:  # Calculate end index of image
                     end = rec_len - 1
                     if post_samples != 0 and ann_time + post_samples < rec_len:
                         end = ann_time + post_samples
@@ -386,8 +420,11 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
                 beats.append(beat)
                 beat_idx = len(beats) - 1
 
+                if max_beat.length < end - start:
+                    max_beat = MaxSample(rec_name, sig_name, lbl_char, ann_idx, prev_ann_index, next_ann_index, pre_samples, post_samples, end - start, beat_idx)
+
                 if pre_samples >= max_sample or post_samples >= max_sample:
-                    max_samples.append({'ann_idx': ann_idx, 'len': end - start, 'pre': pre_samples, 'post': post_samples, 'rec': rec_name, 'sig': sig_name, 'lbl': lbl_char, 'beat_idx': beat_idx})
+                    max_samples.append(MaxSample(rec_name, sig_name, lbl_char, ann_idx, prev_ann_index, next_ann_index, pre_samples, post_samples, end - start, beat_idx))
 
                 if lbl_char not in lbl_map:
                     lbl_map[lbl_char] = {'beats': set(), 'records': {}, 'signals': {}}
@@ -406,6 +443,18 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
                 lbl_map[lbl_char]['beats'].add(beat_idx)
 
                 if sig_name not in sig_map:
+                    sig_map[sig_name] = {'records': set(), 'labels': {lbl_char: 1}}
+
+                if rec_name not in sig_map[sig_name]['records']:
+                    sig_map[sig_name]['records'].add(rec_name)
+
+                if lbl_char not in sig_map[sig_name]['labels']:
+                    sig_map[sig_name]['labels'][lbl_char] = 1
+                else:
+                    sig_map[sig_name]['labels'][lbl_char] += 1
+
+            '''
+                if sig_name not in sig_map:
                     sig_map[sig_name] = {'beats': set(), 'records': {}, 'labels': {}}
 
                 if rec_name not in sig_map[sig_name]['records']:
@@ -420,6 +469,11 @@ def get_db_info(path_db, rec_list, pre_ann, post_ann):
                 sig_map[sig_name]['records'][rec_name].add(beat_idx)
                 sig_map[sig_name]['labels'][lbl_char].add(beat_idx)
                 sig_map[sig_name]['beats'].add(beat_idx)
+            '''
+
+        rec.close()
+
+    max_samples.append(max_beat)
 
     return sig_map, lbl_map, max_samples, beats
 
@@ -447,10 +501,20 @@ def db_info_to_csv(path_images, sig_map, lbl_map, max_samples, beats):
         total = 0
         csv.write(',{}\n'.format(sig))
         for lbl in sig_map[sig]['labels']:
+            csv.write(',,{},{}\n'.format(lbl, sig_map[sig]['labels'][lbl]))
+            total += sig_map[sig]['labels'][lbl]
+
+        csv.write(',{},,{}\n\n'.format('Total', total))
+
+    '''
+        total = 0
+        csv.write(',{}\n'.format(sig))
+        for lbl in sig_map[sig]['labels']:
             csv.write(',,{},{}\n'.format(lbl, len(sig_map[sig]['labels'][lbl])))
             total += len(sig_map[sig]['labels'][lbl])
 
         csv.write(',{},,{}\n\n'.format('Total', total))
+    '''
 
     csv.write('Classes\n')
     for lbl in lbl_map:
@@ -462,10 +526,16 @@ def db_info_to_csv(path_images, sig_map, lbl_map, max_samples, beats):
 
         csv.write(',{},,{}\n\n'.format('Total', total))
 
+    csv.write('Records\n')
+    for sig in sig_map:
+        csv.write(',{}\n'.format(sig))
+        for rec in sig_map[sig]['records']:
+            csv.write(',,{}\n'.format(rec))
+
     csv.write('Max Sample\n')
-    csv.write(',ann_idx,pre_samples,post_samples,rec_name,lbl_char,beat_idx\n')
+    csv.write(',rec_name,sig_name,lbl_char,ann_idx,prev_ann_idx,next_ann_idx,pre_samples,post_samples,length,beat_idx\n')
     for entry in max_samples:
-        csv.write(',{},{},{},{},{},{}\n'.format(entry['ann_idx'], entry['pre'], entry['post'], entry['rec'], entry['lbl'], entry['beat_idx']))
+        csv.write(',{},{},{},{},{},{},{},{},{},{}\n'.format(entry.rec_name, entry.sig_name, entry.lbl_char, entry.ann_idx, entry.prev_ann_idx, entry.next_ann_idx, entry.pre_samples, entry.post_samples, entry.length, entry.beat_idx))
 
     csv.close()
 
