@@ -67,11 +67,11 @@ def main():
     parser.add_argument('-j', '--adjust', action='store_true', default=False, help='Adjust the signals to pad randomly in the front and back for oversampling.')
     parser.add_argument('--pre_ann', action='store', type=float, default=1.1, help='Number of seconds to use before annotation.')
     parser.add_argument('--post_ann', action='store', type=float, default=1.1, help='Number of seconds to use after annotation.')
-    parser.add_argument('--pixels', action='store', type=int, default=256, help='Number of pixels for rows and cols of image.')
+    parser.add_argument('--pixels', action='store', type=int, default=128, help='Number of pixels for rows and cols of image.')
     parser.add_argument('--percent_test', action='store', type=float, default=0.2, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/', help='Local path to where PhysioNet databses are stored.')
     parser.add_argument('--db', action='store', type=str, default=None, required=True, help='PhysioNet databases to process.')
-    parser.add_argument('--dataset_len', action='store', default=60000, help='Maximum length of the image/signal dataset.')
+    parser.add_argument('--dataset_len', action='store', default=100000, help='Maximum length of the image/signal dataset.')
     parser.add_argument('--signals', nargs='+', default=[], help='Signal to use for image/signal generation.')
     args = parser.parse_args()
     argsdict = vars(args)
@@ -413,6 +413,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
     :param sig_list:
     :param pre_ann:
     :param post_ann:
+    :param pad_random:
     :return:
     """
     beats = deque()
@@ -423,7 +424,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
     max_samples = deque()
     max_beat = MaxSample()
 
-    print('Compiling beat info into databases...')
+    print('Gathering database info...')
     for rec_name in tqdm(rec_list):
         rec = pywfdb.Record(path_db + rec_name)
         annotations = rec.annotation().read()
@@ -460,11 +461,11 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
             pre_samples = int(round(pre_ann * prev_r_r))  # Number samples to capture before annotation
             post_samples = int(round(post_ann * next_r_r))  # Number samples to capture after annotation
 
-            if pre_samples > max_sample:
-                pre_samples = max_sample
-
-            if post_samples > max_sample:
-                post_samples = max_sample
+            # if pre_samples > max_sample:
+            #     pre_samples = max_sample
+            #
+            # if post_samples > max_sample:
+            #     post_samples = max_sample
 
             lbl_char = get_annotation_char(ann)
 
@@ -497,14 +498,14 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                 pad = 0
                 if pad_random:
                     pad = int(round((end - start) * 0.1))
-                    start -= pad
-                    end += pad
+                    pad_start -= pad
+                    pad_end += pad
 
-                start = max(0, start)
-                end = min(end, rec_len)
+                pad_start = max(0, start)
+                pad_end = min(end, rec_len)
 
                 # Read in the signal from the record.
-                signal = rec.read(sig_name, start, end - start)
+                signal = rec.read(sig_name, pad_start, pad_end - pad_start)
 
                 beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl_char, get_annotation_onehot(ann), signal, pad)
                 beats.append(beat)
@@ -543,24 +544,6 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                 else:
                     sig_map[sig_name]['labels'][lbl_char] += 1
 
-            '''
-                if sig_name not in sig_map:
-                    sig_map[sig_name] = {'beats': set(), 'records': {}, 'labels': {}}
-
-                if rec_name not in sig_map[sig_name]['records']:
-                    sig_map[sig_name]['records'][rec_name] = set()
-
-                # if lbl_char not in sig_map[sig_name]['records'][rec_name]:
-                #     lbl_map[lbl_char]['records'][rec_name][sig_name] = set()
-
-                if lbl_char not in sig_map[sig_name]['labels']:
-                    sig_map[sig_name]['labels'][lbl_char] = set()
-
-                sig_map[sig_name]['records'][rec_name].add(beat_idx)
-                sig_map[sig_name]['labels'][lbl_char].add(beat_idx)
-                sig_map[sig_name]['beats'].add(beat_idx)
-            '''
-
         rec.close()
 
     max_samples.append(max_beat)
@@ -573,6 +556,8 @@ def db_info_to_csv(path_images, db_name, sig_str, sig_map, lbl_map, max_samples,
     """
 
     :param path_images:
+    :param db_name:
+    :param sig_str:
     :param sig_map:
     :param lbl_map:
     :param max_samples:
@@ -646,7 +631,7 @@ def get_annotation_char(ann):
     elif ann.type == 6:
         return 'F'
     else:
-        return 'X'
+        return None
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -661,7 +646,7 @@ def get_annotation_onehot(ann):
     elif ann.type == 6:
         return [0., 0., 0., 1.]
     else:
-        return [0., 0., 0., 0.]
+        return None
 
 
 # ----------------------------------------------------------------------------------------------------------------------
