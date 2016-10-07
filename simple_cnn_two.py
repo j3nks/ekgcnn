@@ -359,7 +359,7 @@ def main():
     nb_epoch = 30
     nb_classes = 4
     data_augmentation = False
-    overwrite = False
+    overwrite = True
 
     # Input image dimensions
     img_rows = img_cols = 256
