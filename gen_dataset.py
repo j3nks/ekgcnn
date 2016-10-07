@@ -76,28 +76,27 @@ def main():
     args = parser.parse_args()
     argsdict = vars(args)
 
-    gen_records = argsdict['gen_records']
-    gen_signals = argsdict['gen_signals']
-    gen_images = argsdict['gen_images']
-    gen_test = argsdict['gen_test']
-    gen_png = argsdict['gen_png']
     pad_random = argsdict['adjust']
     pre_ann = argsdict['pre_ann']
     post_ann = argsdict['post_ann']
-    img_pixels = argsdict['pixels']
-    percent_test = argsdict['percent_test']
     is_balanced = argsdict['is_balanced']
-    dataset_len = argsdict['dataset_len']
+
     sig_list = set(argsdict['signals'])
     signals_str = '_'.join(sig_list).lower()
     signals_str = '{}{}'.format('balanced_' if is_balanced else '', 'all' if signals_str == '' else signals_str)
 
     db_name = argsdict['db']
     path_db = '{}db/{}/'.format(argsdict['path'], db_name)
-    path_images = '{}datasets/{}/{}/'.format(argsdict['path'], db_name, signals_str)
+    path_ds = '{}datasets/{}/{}/'.format(argsdict['path'], db_name, signals_str)
 
-    # if os.path.exists(path_images):
-    #     shutil.rmtree(path_images)
+    # Update args dict with new entries.
+    argsdict['sig_list'] = sig_list
+    argsdict['signals_str'] = signals_str
+    argsdict['path_db'] = path_db
+    argsdict['path_ds'] = path_ds
+
+    # if os.path.exists(path_ds):
+    #     shutil.rmtree(path_ds)
 
     # Get the file listing of the database files (.dat)
     if not os.path.exists(path_db):
@@ -115,7 +114,7 @@ def main():
         print('No signals found!')
         exit()
 
-    db_info_to_csv(path_images, db_name, signals_str, sig_map, lbl_map, max_samples, beats)
+    db_info_to_csv(path_ds, db_name, signals_str, sig_map, lbl_map, max_samples, beats)
 
     del sig_map
 
@@ -136,12 +135,9 @@ def gen_dataset(lbl_map, beats, max_samples, argsdict):
     percent_test = argsdict['percent_test']
     is_balanced = argsdict['is_balanced']
     dataset_len = argsdict['dataset_len']
-    sig_list = set(argsdict['signals'])
-    signals_str = '_'.join(sig_list).lower()
-    signals_str = '{}{}'.format('balanced_' if is_balanced else '', 'all' if signals_str == '' else signals_str)
-
+    signals_str = argsdict['signals_str']
     db_name = argsdict['db']
-    path_images = '{}datasets/{}/{}/'.format(argsdict['path'], db_name, signals_str)
+    path_ds = argsdict['path_ds']
 
     nb_beats = [0] * len(lbl_map)
     for idx, lbl_char in enumerate(lbl_map):
@@ -189,11 +185,11 @@ def gen_dataset(lbl_map, beats, max_samples, argsdict):
 
         print('Compressing signals to file...')
         if gen_test:
-            np.savez_compressed('{}signals_{}_{}_train_test'.format(path_images, db_name, signals_str), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
+            np.savez_compressed('{}signals_{}_{}_train_test'.format(path_ds, db_name, signals_str), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
             del y_test
             del sig_test
 
-        np.savez_compressed('{}signals_{}_{}_train'.format(path_images, db_name, signals_str), x_train=sig_train, y_train=y_train)
+        np.savez_compressed('{}signals_{}_{}_train'.format(path_ds, db_name, signals_str), x_train=sig_train, y_train=y_train)
         del y_train
         del sig_train
 
@@ -206,19 +202,19 @@ def gen_dataset(lbl_map, beats, max_samples, argsdict):
             slice_start = int(i * dataset_len)
             slice_end = int(min(len(test_beats), slice_start + dataset_len))
             if gen_test:
-                x_test, y_test = get_dataset(test_beats[slice_start:slice_end], True, gen_images, gen_png, path_images, img_pixels, pad_random)
+                x_test, y_test = get_dataset(test_beats[slice_start:slice_end], True, gen_images, gen_png, path_ds, img_pixels, pad_random)
                 test_beats = test_beats[slice_end:]
 
             slice_end = min(len(train_beats), slice_start + dataset_len)
-            x_train, y_train = get_dataset(train_beats[slice_start:slice_end], True, gen_images, gen_png, path_images, img_pixels, pad_random)
+            x_train, y_train = get_dataset(train_beats[slice_start:slice_end], True, gen_images, gen_png, path_ds, img_pixels, pad_random)
             train_beats = train_beats[slice_end:]
 
             print('Compressing datasets...')
             if gen_test:
-                np.savez_compressed('{}images_{}_{}_train_test_{}'.format(path_images, db_name, signals_str, i), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
+                np.savez_compressed('{}images_{}_{}_train_test_{}'.format(path_ds, db_name, signals_str, i), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
             else:
-                np.savez_compressed('{}images_{}_{}_train_{}'.format(path_images, db_name, signals_str, i), x_train=x_train, y_train=y_train)
+                np.savez_compressed('{}images_{}_{}_train_{}'.format(path_ds, db_name, signals_str, i), x_train=x_train, y_train=y_train)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -297,11 +293,11 @@ def get_balanced_indices(lbl_map, nb_rows, percent_test, is_balanced):
     return lbl_map, balanced_indices
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_dataset(beats, is_test, gen_images, gen_png, path_images, img_pixels, pad_random):
+def get_dataset(beats, is_test, gen_images, gen_png, path_ds, img_pixels, pad_random):
     """
     Create a balanced set of beats with even distribution across all records.
     :param path_db:
-    :param path_images:
+    :param path_ds:
     :param lbl_map:
     :param beats:
     :param img_pixels:
@@ -320,19 +316,19 @@ def get_dataset(beats, is_test, gen_images, gen_png, path_images, img_pixels, pa
 
     buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
 
-    # csv = open(path_images + 'db_images.csv', 'wb')
+    # csv = open(path_ds + 'db_images.csv', 'wb')
     # csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
 
     if is_test:
-        path_images += 'test/'
+        path_ds += 'test/'
         # Create directory to store images
-        if not os.path.exists(path_images):
-            os.makedirs(path_images)
+        if not os.path.exists(path_ds):
+            os.makedirs(path_ds)
     else:
-        path_images += 'train/'
+        path_ds += 'train/'
         # Create directory to store images
-        if not os.path.exists(path_images):
-            os.makedirs(path_images)
+        if not os.path.exists(path_ds):
+            os.makedirs(path_ds)
 
     for idx, beat in enumerate(tqdm(beats)):
 
@@ -348,7 +344,7 @@ def get_dataset(beats, is_test, gen_images, gen_png, path_images, img_pixels, pa
                 beat.signal = beat.signal[start:end]
 
             # Convert to image row
-            im_row = signal_to_image(path_images, buf, img_pixels, beat, gen_png, is_test)
+            im_row = signal_to_image(path_ds, buf, img_pixels, beat, gen_png, is_test)
 
             # Assign the images to dataset
             # x[idx] = im_row
@@ -365,7 +361,7 @@ def get_dataset(beats, is_test, gen_images, gen_png, path_images, img_pixels, pa
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def signal_to_image(path_images, image_buffer, img_pixels, beat, gen_png, is_test):
+def signal_to_image(path_ds, image_buffer, img_pixels, beat, gen_png, is_test):
     image_buffer.seek(0)
 
     # Create image from matplotlib
@@ -392,9 +388,9 @@ def signal_to_image(path_images, image_buffer, img_pixels, beat, gen_png, is_tes
 
     if gen_png:
         if is_test:
-            im.save('{}/{}_{}_{}_{}{}'.format(path_images, beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+            im.save('{}/{}_{}_{}_{}{}'.format(path_ds, beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
         else:
-            im.save('{}/{}_{}_{}_{}{}'.format(path_images, beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
+            im.save('{}/{}_{}_{}_{}{}'.format(path_ds, beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, '.png'))
 
     # Free memory
     plt.close(fig)
@@ -496,13 +492,15 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
 
                 # Pad signal with %10 the length in front and back for random shifting later.
                 pad = 0
-                if pad_random:
+                pad_start = start
+                pad_end = end
+                if pad_random
                     pad = int(round((end - start) * 0.1))
                     pad_start -= pad
                     pad_end += pad
 
-                pad_start = max(0, start)
-                pad_end = min(end, rec_len)
+                pad_start = max(0, pad_start)
+                pad_end = min(pad_end, rec_len)
 
                 # Read in the signal from the record.
                 signal = rec.read(sig_name, pad_start, pad_end - pad_start)
@@ -552,10 +550,10 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def db_info_to_csv(path_images, db_name, sig_str, sig_map, lbl_map, max_samples, beats):
+def db_info_to_csv(path_ds, db_name, sig_str, sig_map, lbl_map, max_samples, beats):
     """
 
-    :param path_images:
+    :param path_ds:
     :param db_name:
     :param sig_str:
     :param sig_map:
@@ -568,10 +566,10 @@ def db_info_to_csv(path_images, db_name, sig_str, sig_map, lbl_map, max_samples,
     print('Writing beat info to CSV file...')
 
     # Create directory to store dataset.
-    if not os.path.exists(path_images):
-        os.makedirs(path_images)
+    if not os.path.exists(path_ds):
+        os.makedirs(path_ds)
 
-    csv = open('{}{}_{}_db_breakdown.csv'.format(path_images, db_name, sig_str), 'wb')
+    csv = open('{}{}_{}_db_breakdown.csv'.format(path_ds, db_name, sig_str), 'wb')
     csv.write('Total Beats\n')
     csv.write(',{}\n'.format(len(beats)))
 
