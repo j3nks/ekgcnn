@@ -72,7 +72,7 @@ def main():
     parser.add_argument('--percent_test', action='store', type=float, default=0.2, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/', help='Local path to where PhysioNet databses are stored.')
     parser.add_argument('--db', action='store', type=str, default=None, required=True, help='PhysioNet databases to process.')
-    parser.add_argument('--dataset_len', action='store', type=int, default=1000, help='Maximum length of the image/signal dataset that will fit into memory.')
+    parser.add_argument('--dataset_len', action='store', type=int, default=60000, help='Maximum length of the image/signal dataset that will fit into memory.')
     parser.add_argument('--signals', nargs='+', default=[], help='Signal to use for image/signal generation.')
     args = parser.parse_args()
     argsdict = vars(args)
@@ -248,10 +248,9 @@ def gen_balanced_dataset(lbl_map, beats, max_samples, argsdict):
 
     nb_datasets = int(ceil(total_beats / dataset_len))
     nb_rows = int(round(dataset_len / len(lbl_map)))
-
     for i in trange(nb_datasets, desc='Generating datasets'):
         if total_beats > dataset_len:
-            nb_rows = min(total_beats - ((i + 1) * nb_rows), nb_rows)
+            nb_rows = min((total_beats - (i * nb_rows * len(lbl_map)) / len(lbl_map)), nb_rows)
 
         nb_test_rows = 0
         test_beats = []
@@ -334,7 +333,7 @@ def get_balanced_beats(lbl_map, beats, nb_rows, pad_list):
     for lbl_char in tqdm(lbl_map, desc='Creating balanced dataset'):  # Get balanced data for all classes.
         balanced_indices[lbl_char] = deque(maxlen=nb_rows)
 
-        while len(balanced_indices[lbl_char]) < nb_rows:
+        while len(balanced_indices[lbl_char]) < nb_rows and len(lbl_map[lbl_char]['beats']) > 0:
             nb_sample = min(len(lbl_map[lbl_char]['beats']), nb_rows)
             samples = random.sample(lbl_map[lbl_char]['beats'], nb_sample)
             balanced_indices[lbl_char].extend(samples)
