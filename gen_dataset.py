@@ -1,6 +1,7 @@
-from __future__ import division
+from __future__ import division, print_function
 
 import argparse
+import copy
 import io
 import os
 import random
@@ -17,7 +18,7 @@ import pywfdb
 from PIL import Image
 from tqdm import *
 
-rng_seed = 2016
+rng_seed = 2017
 random.seed(rng_seed)
 np.random.seed(seed=rng_seed)
 
@@ -64,19 +65,20 @@ def main():
     parser.add_argument('-p', '--gen_png', action='store_true', default=False, help='Generate png image files.')
     parser.add_argument('-b', '--is_balanced', action='store_true', default=False, help='Generate a balanced dataset.')
     parser.add_argument('-r', '--gen_records', action='store_true', default=False, help='Generate separate images/signals datasets from records.')
-    parser.add_argument('-j', '--adjust', action='store_true', default=False, help='Adjust the signals to pad randomly in the front and back for oversampling.')
+    parser.add_argument('--pad', action='store_true', default=False, help='Pad randomly in the front and back when oversampling.')
     parser.add_argument('--pre_ann', action='store', type=float, default=1.1, help='Number of seconds to use before annotation.')
     parser.add_argument('--post_ann', action='store', type=float, default=1.1, help='Number of seconds to use after annotation.')
     parser.add_argument('--pixels', action='store', type=int, default=128, help='Number of pixels for rows and cols of image.')
     parser.add_argument('--percent_test', action='store', type=float, default=0.2, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/', help='Local path to where PhysioNet databses are stored.')
     parser.add_argument('--db', action='store', type=str, default=None, required=True, help='PhysioNet databases to process.')
-    parser.add_argument('--dataset_len', action='store', default=100000, help='Maximum length of the image/signal dataset.')
+    parser.add_argument('--dataset_len', action='store', type=int, default=1000, help='Maximum length of the image/signal dataset that will fit into memory.')
     parser.add_argument('--signals', nargs='+', default=[], help='Signal to use for image/signal generation.')
     args = parser.parse_args()
     argsdict = vars(args)
 
-    pad_random = argsdict['adjust']
+    gen_png = argsdict['gen_png']
+    pad_random = argsdict['pad']
     pre_ann = argsdict['pre_ann']
     post_ann = argsdict['post_ann']
     is_balanced = argsdict['is_balanced']
@@ -94,6 +96,16 @@ def main():
     argsdict['signals_str'] = signals_str
     argsdict['path_db'] = path_db
     argsdict['path_ds'] = path_ds
+
+    if gen_png:
+        if gen_test:
+            path = path_ds + 'test/'
+            if not os.path.exists(path):
+                os.makedirs(path)
+        else:
+            path = path_ds + 'train/'
+            if not os.path.exists(path):
+                os.makedirs(path)
 
     # if os.path.exists(path_ds):
     #     shutil.rmtree(path_ds)
@@ -121,19 +133,91 @@ def main():
     # Convert to numpy array for easy manipulation.
     beats = np.array(beats)
 
-    gen_dataset(lbl_map, beats, max_samples, argsdict)
+    if argsdict['dataset_len'] == 0:
+        argsdict['dataset_len'] = len(beats)
+
+    if is_balanced:
+        gen_balanced_dataset(lbl_map, beats, max_samples, argsdict)
+    else:
+        # TODO: Complete this for unbalanced datasets i.e. MLII Test
+        gen_dataset(lbl_map, beats, max_samples, argsdict)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 def gen_dataset(lbl_map, beats, max_samples, argsdict):
     gen_signals = argsdict['gen_signals']
     gen_images = argsdict['gen_images']
+    gen_png = argsdict['gen_png']
+    pad_random = argsdict['pad']
+    img_pixels = argsdict['pixels']
+    dataset_len = argsdict['dataset_len']
+    signals_str = argsdict['signals_str']
+    db_name = argsdict['db']
+    path_ds = argsdict['path_ds']
+
+    dataset_indices = {}
+    ratio = dataset_len / len(beats)
+    for lbl_char in lbl_map:
+        if ratio < 1.0:
+            # We preserve class ratio.
+            nb_samples = int(round(ratio * len(lbl_map[lbl_char]['beats'])))
+            samples = random.sample(lbl_map[lbl_char]['beats'], nb_samples)
+            dataset_indices[lbl_char] = samples
+            # Remove samples from pool.
+            lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(samples)
+        else:
+            dataset_indices[lbl_char] = lbl_map[lbl_char]['beats']
+            # Remove samples from pool.
+            lbl_map[lbl_char]['beats'] = set()
+
+    # Convert indices to beats.
+    dataset_beats = deque()
+    delete_indices = set()
+    for lbl_char in dataset_indices:
+        dataset_beats.extend(beats[list(dataset_indices[lbl_char])])
+        # Remove samples from pool.
+        delete_indices.update(dataset_indices[lbl_char])
+
+    # Finally delete beats not in pad_list
+    # beats = np.delete(beats, list(delete_indices))
+
+    # Randomize beats so they are in no particular order
+    dataset_beats = np.array(dataset_beats)
+    np.random.shuffle(dataset_beats)
+
+    # Deal with padding.
+    dataset_beats = randomize_beats(dataset_beats, pad_random, [])
+
+    # To save memory we do signals first then images.
+    if gen_signals:
+        # Get max signal length.
+        signal_len = sorted(max_samples, key=lambda b: b.length, reverse=True)[0].length  # TODO: Can probably just iterate through the beats to find the max signal length.
+
+        sig_test, y_test = get_dataset(path_ds, dataset_beats, signal_len, gen_signals, False, False, None, False)
+
+        print('\nCompressing signals to file...')
+        np.savez_compressed('{}signals_{}_{}_test'.format(path_ds, db_name, signals_str), x_test=sig_test, y_test=y_test)
+
+        # Free Memory
+        del y_test
+        del sig_test
+
+    if gen_images:
+        x_test, y_test = get_dataset(path_ds + 'test/', dataset_beats, None, False, gen_images, gen_png, img_pixels, False)
+
+        print('\nCompressing datasets...')
+        np.savez_compressed('{}images_{}_{}_test'.format(path_ds, db_name, signals_str), x_test=x_test, y_test=y_test)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def gen_balanced_dataset(lbl_map, beats, max_samples, argsdict):
+    gen_signals = argsdict['gen_signals']
+    gen_images = argsdict['gen_images']
     gen_test = argsdict['gen_test']
     gen_png = argsdict['gen_png']
-    pad_random = argsdict['adjust']
+    pad_random = argsdict['pad']
     img_pixels = argsdict['pixels']
     percent_test = argsdict['percent_test']
-    is_balanced = argsdict['is_balanced']
     dataset_len = argsdict['dataset_len']
     signals_str = argsdict['signals_str']
     db_name = argsdict['db']
@@ -145,71 +229,72 @@ def gen_dataset(lbl_map, beats, max_samples, argsdict):
 
     nb_beats.sort()
 
-    if is_balanced:
-        nb_rows = nb_beats[len(nb_beats) - 1]
-    else:
-        nb_rows = len(beats)
+    max_rows = nb_beats[len(nb_beats) - 1]
 
-    nb_test_rows = 0
-    max_samples = [sorted(max_samples, key=lambda b: b.length, reverse=True)[0]]
-    test_beats = []
-    if gen_test:
-        # Generate test dataset beats.
-        nb_test_rows = int(nb_beats[0] * percent_test)
-        lbl_map, beats, test_beats = get_dataset_beats(lbl_map, beats, nb_test_rows, percent_test, is_balanced)
+    # Get a list of labels that are less than the number of desired images/signals.
+    pad_list = set()
+    if pad_random:
+        for lbl_char in lbl_map:
+            if max_rows > len(lbl_map[lbl_char]['beats']):
+                pad_list.add(lbl_char)
 
-    # Generate train dataset beats.
-    nb_train_rows = nb_rows - nb_test_rows
-    lbl_map, beats, train_beats = get_dataset_beats(lbl_map, beats, nb_train_rows, 1.0, is_balanced)
+    # Get max signal length.
+    signal_len = sorted(max_samples, key=lambda b: b.length, reverse=True)[0].length  # TODO: Can probably just iterate through the beats to find the max signal length.
 
-    if gen_signals:
-        print('Generating signals...')
-        # Get max signal length.
-        max_samples = sorted(max_samples, key=lambda b: b.length, reverse=True)
-        signal_len = max_samples[0].length
+    # Loop to break up large datasets into memory manageable chunks.
+    total_beats = max_rows * len(lbl_map)
+    if dataset_len > total_beats:
+        dataset_len = total_beats
 
+    nb_datasets = int(ceil(total_beats / dataset_len))
+    nb_rows = int(round(dataset_len / len(lbl_map)))
+
+    for i in trange(nb_datasets, desc='Generating datasets'):
+        if total_beats > dataset_len:
+            nb_rows = min(total_beats - ((i + 1) * nb_rows), nb_rows)
+
+        nb_test_rows = 0
+        test_beats = []
         if gen_test:
-            sig_test = np.empty((len(test_beats), signal_len), dtype=np.float32)
-            y_test = np.empty((len(test_beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+            # Generate test dataset beats.
+            nb_test_rows = int(nb_beats[0] * percent_test)
 
-            for idx, beat in enumerate(tqdm(test_beats)):
-                sig_test[idx] = pad_signal(beat.signal, signal_len)
-                y_test[idx] = beat.lbl_onehot
+            lbl_map, test_beats, test_indices = get_balanced_beats(lbl_map, beats, nb_test_rows, pad_list)
+            test_beats = randomize_beats(test_beats, pad_random, pad_list)
 
-        sig_train = np.empty((len(train_beats), signal_len), dtype=np.float32)
-        y_train = np.empty((len(train_beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+        # Generate train dataset beats.
+        nb_train_rows = nb_rows - nb_test_rows
+        lbl_map, train_beats, train_indices = get_balanced_beats(lbl_map, beats, nb_train_rows, pad_list)
+        train_beats = randomize_beats(train_beats, pad_random, pad_list)
 
-        for idx, beat in enumerate(tqdm(train_beats)):
-            sig_train[idx] = pad_signal(beat.signal, signal_len)
-            y_train[idx] = beat.lbl_onehot
-
-        print('Compressing signals to file...')
-        if gen_test:
-            np.savez_compressed('{}signals_{}_{}_train_test'.format(path_ds, db_name, signals_str), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
-            del y_test
-            del sig_test
-
-        np.savez_compressed('{}signals_{}_{}_train'.format(path_ds, db_name, signals_str), x_train=sig_train, y_train=y_train)
-        del y_train
-        del sig_train
-
-    if gen_images:
-        print('Generating images...')
-        # Loop to break up large datasets into memory manageable chunks.
-        nb_slices = int(ceil((len(train_beats) + len(test_beats)) / dataset_len))
-        for i in tqdm(xrange(nb_slices)):
-            # if len(train_beats) + len(test_beats) > dataset_len:
-            slice_start = int(i * dataset_len)
-            slice_end = int(min(len(test_beats), slice_start + dataset_len))
+        # To save memory we do signals first then images.
+        if gen_signals:
             if gen_test:
-                x_test, y_test = get_dataset(test_beats[slice_start:slice_end], True, gen_images, gen_png, path_ds, img_pixels, pad_random)
-                test_beats = test_beats[slice_end:]
+                sig_test, y_test = get_dataset(path_ds, test_beats, signal_len, gen_signals, False, False, None, True)
 
-            slice_end = min(len(train_beats), slice_start + dataset_len)
-            x_train, y_train = get_dataset(train_beats[slice_start:slice_end], True, gen_images, gen_png, path_ds, img_pixels, pad_random)
-            train_beats = train_beats[slice_end:]
+            sig_train, y_train = get_dataset(path_ds, test_beats, signal_len, gen_signals, False, False, None, False)
 
-            print('Compressing datasets...')
+            # print('Compressing signals to file...')
+            if gen_test:
+                np.savez_compressed('{}signals_{}_{}_train_test_{}'.format(path_ds, db_name, signals_str, i), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
+
+                # Free memory
+                del y_test
+                del sig_test
+
+            np.savez_compressed('{}signals_{}_{}_train_{}'.format(path_ds, db_name, signals_str, i), x_train=sig_train, y_train=y_train)
+
+            # Free Memory
+            del y_train
+            del sig_train
+
+        if gen_images:
+            if gen_test:
+                x_test, y_test = get_dataset(path_ds + 'test/', test_beats, None, False, gen_images, gen_png, img_pixels, True)
+
+            x_train, y_train = get_dataset(path_ds + 'train/', train_beats, None, False, gen_images, gen_png, img_pixels, False)
+
+            # print('\nCompressing datasets...')
             if gen_test:
                 np.savez_compressed('{}images_{}_{}_train_test_{}'.format(path_ds, db_name, signals_str, i), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
@@ -218,150 +303,122 @@ def gen_dataset(lbl_map, beats, max_samples, argsdict):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_dataset_beats(lbl_map, beats, nb_rows, percent_test, is_balanced):
+def randomize_beats(beats, pad_random, pad_list):
+    if pad_random:
+        for idx, beat in enumerate(tqdm(beats, mininterval=2.0, desc='Randomizing beats')):
+            pad_beat = copy.deepcopy(beat)
+            sig_len = len(pad_beat.signal)
+            pad_len = pad_beat.pad
+
+            if pad_beat.lbl_char in pad_list:  # Create a random shift in signal
+                shift = random.randint(0, pad_len)
+                start = pad_len - shift
+                end = sig_len - shift
+
+                # start = pad_len - random.randint(0, pad_len)
+                # end = (sig_len - pad_len) + random.randint(0, pad_len)
+
+            else:  # Strip pad from class that doesn't need it.
+                start = pad_len
+                end = sig_len - pad_len
+
+            pad_beat.signal = pad_beat.signal[start:end]
+
+    return beats
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_balanced_beats(lbl_map, beats, nb_rows, pad_list):
     # Get the dataset beats
-    delete_indices = set()
-    if is_balanced:
-        lbl_map, balanced_indices = get_balanced_indices(lbl_map, nb_rows, percent_test, is_balanced)
+    balanced_indices = {}
+    for lbl_char in tqdm(lbl_map, desc='Creating balanced dataset'):  # Get balanced data for all classes.
+        balanced_indices[lbl_char] = deque(maxlen=nb_rows)
 
-        # Convert indices to beats and remove all used beats.
-        dataset_beats = deque()
-        for lbl in balanced_indices:
-            dataset_beats.extend(beats[balanced_indices[lbl]])
-            delete_indices.update(balanced_indices[lbl])
+        while len(balanced_indices[lbl_char]) < nb_rows:
+            nb_sample = min(len(lbl_map[lbl_char]['beats']), nb_rows)
+            samples = random.sample(lbl_map[lbl_char]['beats'], nb_sample)
+            balanced_indices[lbl_char].extend(samples)
 
-        dataset_beats = np.array(dataset_beats)
-    else:
-        dataset_beats = beats
-        delete_indices.update(range(0, len(beats)))
+            # Remove samples from pool.
+            if lbl_char not in pad_list:
+                lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(samples)
 
-    beats = np.delete(beats, list(delete_indices))
+    # Convert indices to beats and remove used beats.
+    dataset_beats = deque()
+    dataset_indices = set()  # TODO: What do we do with the dataset_indices?
+    for lbl_char in balanced_indices:
+        dataset_beats.extend(beats[balanced_indices[lbl_char]])
+
+        # Samples to remove from pool.
+        dataset_indices.update(balanced_indices[lbl_char])
+
+        # Remove samples from pool.
+        #if lbl_char in pad_list:
+            #lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(balanced_indices[lbl_char])
 
     # Randomize beats so they are in no particular order
+    dataset_beats = np.array(dataset_beats)
     np.random.shuffle(dataset_beats)
 
-    return lbl_map, beats, dataset_beats
+    return lbl_map, dataset_beats, dataset_indices
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_balanced_indices(lbl_map, nb_rows, percent_test, is_balanced):
-
-    if is_balanced:
-        print('Creating balanced datasets...')
-        balanced_indices = {}
-        for lbl_char in tqdm(lbl_map):  # Get balanced data for all classes.
-            balanced_indices[lbl_char] = deque(maxlen=nb_rows)
-            if len(lbl_map[lbl_char]['beats']) < nb_rows:  # We must not delete from pool until oversampling is finished.
-                percent_sample = 1.0
-                oversampled = deque()
-                while len(balanced_indices[lbl_char]) < nb_rows:  # Ensure we fill the class with all samples.
-                    if len(lbl_map[lbl_char]['beats']) > nb_rows - len(balanced_indices[lbl_char]):
-                        percent_sample = 1.0 - (len(balanced_indices[lbl_char]) / float(nb_rows))
-
-                    for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
-                        for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
-
-                            samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_sample)))
-                            balanced_indices[lbl_char].extend(samples)
-                            oversampled.extend(samples)
-
-                # It's ok to remove used samples from pool after finishing oversampling.
-                oversampled = set(oversampled)
-                for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
-                    for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
-                        lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(oversampled)
-                        lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(oversampled)
-
-                lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(oversampled)
-
-            else:  # Don't have to do any oversampling.
-                percent_sample = float(nb_rows) / len(lbl_map[lbl_char]['beats'])
-                if percent_test < 1:  # Generating a test set
-                    percent_sample *= percent_test
-
-                for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
-                    for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
-                        samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_test)))
-
-                        balanced_indices[lbl_char].extend(samples)
-
-                        # We must remove samples from pool so they are not reused.
-                        lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(samples)
-                        lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(samples)
-                        lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(samples)
-
-    return lbl_map, balanced_indices
-
-# ----------------------------------------------------------------------------------------------------------------------
-def get_dataset(beats, is_test, gen_images, gen_png, path_ds, img_pixels, pad_random):
+# TODO: Split this function into two seperate funstion one for image and one for signals.
+def get_dataset(path_ds, beats, signal_len, gen_signals, gen_images, gen_png, img_pixels, is_test):
     """
-    Create a balanced set of beats with even distribution across all records.
-    :param path_db:
+    Will generate either a signal (priority) or image dataset from given beats.
     :param path_ds:
-    :param lbl_map:
     :param beats:
-    :param img_pixels:
-    :param nb_rows:
-    :param percent_test:
     :param signal_len:
-    :param gen_images:
     :param gen_signals:
-    :param is_balanced:
+    :param gen_images:
+    :param gen_png:
+    :param img_pixels:
+    :param is_test:
     :return:
     """
 
-    # Preallocate memory
-    x = np.empty((len(beats), int(img_pixels ** 2)), dtype=np.float32)
-    y = np.empty((len(beats), 4), dtype=np.float32)
+    if gen_signals:
+        # Preallocate memory
+        x = np.empty((len(beats), signal_len), dtype=np.float32)
+        y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
 
-    buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
+    elif gen_images:
+        # csv = open(path_ds + 'db_images.csv', 'wb')
+        # csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
 
-    # csv = open(path_ds + 'db_images.csv', 'wb')
-    # csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
+        # Preallocate memory
+        x = np.empty((len(beats), int(img_pixels ** 2)), dtype=np.float32)
+        y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+        buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
 
-    if is_test:
-        path_ds += 'test/'
-        # Create directory to store images
-        if not os.path.exists(path_ds):
-            os.makedirs(path_ds)
-    else:
-        path_ds += 'train/'
-        # Create directory to store images
-        if not os.path.exists(path_ds):
-            os.makedirs(path_ds)
+    for idx, beat in enumerate(tqdm(beats, mininterval=2.0, desc='Generating images/signals')):
+        if gen_signals:
+            x[idx] = pad_signal(beat.signal, signal_len)
 
-    for idx, beat in enumerate(tqdm(beats)):
-
-        if gen_images:
-            if pad_random:
-                sig_len = len(beat.signal)
-                # orig_len = int(round((5.0/6) * sig_len))
-                # pad_len = int(round(orig_len * .1))
-                pad_len = beat.pad
-                rand_shift = random.randint(0, pad_len)
-                start = pad_len - rand_shift
-                end = (sig_len - pad_len) + rand_shift
-                beat.signal = beat.signal[start:end]
-
+        elif gen_images:
             # Convert to image row
-            im_row = signal_to_image(path_ds, buf, img_pixels, beat, gen_png, is_test)
+            im_row = signal_to_image(path_ds, beat, buf, img_pixels, gen_png, is_test)
 
             # Assign the images to dataset
-            # x[idx] = im_row
             x[idx] = im_row / 255
-            y[idx] = beat.lbl_onehot
 
-        # Print to CSV file
-        # csv.write('{},{},{},{},[{}{}{}{}]\n'.format(beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
+            # Print to CSV file
+            # csv.write('{},{},{},{},[{}{}{}{}]\n'.format(beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
 
-    buf.close()
-    # csv.close()
+        # Labels are the same for both images and signals
+        y[idx] = beat.lbl_onehot
+
+    if not gen_signals and gen_images:
+        buf.close()
+        # csv.close()
 
     return x, y
 
 
-# ----------------------------------------------------------------------------------------------------------------------
-def signal_to_image(path_ds, image_buffer, img_pixels, beat, gen_png, is_test):
+#  ----------------------------------------------------------------------------------------------------------------------
+def signal_to_image(path_ds, beat, image_buffer, img_pixels, gen_png, is_test):
     image_buffer.seek(0)
 
     # Create image from matplotlib
@@ -379,7 +436,7 @@ def signal_to_image(path_ds, image_buffer, img_pixels, beat, gen_png, is_test):
     # Change image to to black and white with PIL
     im = Image.open(image_buffer)
     im = im.convert('L')
-    im = im.point(lambda x: 0 if x < 254 else 255)  # , '1')
+    # im = im.point(lambda x: 0 if x < 254 else 255)  # , '1')  #TODO: Investigate if we really need this?
     # im.show()
 
     # Convert image to 1d vector
@@ -420,8 +477,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
     max_samples = deque()
     max_beat = MaxSample()
 
-    print('Gathering database info...')
-    for rec_name in tqdm(rec_list):
+    for rec_name in tqdm(rec_list, desc='Gathering database info'):
         rec = pywfdb.Record(path_db + rec_name)
         annotations = rec.annotation().read()
 
@@ -470,6 +526,9 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
 
             # Calculate start index of image
             start = ann_time - pre_samples
+            if prev_r_r == 0:
+                start = 0
+
             end = 0
 
             for sig_idx, sig_name in enumerate(rec.signal_names):
@@ -494,7 +553,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                 pad = 0
                 pad_start = start
                 pad_end = end
-                if pad_random
+                if pad_random:
                     pad = int(round((end - start) * 0.1))
                     pad_start -= pad
                     pad_end += pad
@@ -522,13 +581,17 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                     lbl_map[lbl_char]['records'][rec_name] = {}
 
                 if sig_name not in lbl_map[lbl_char]['records'][rec_name]:
-                    lbl_map[lbl_char]['records'][rec_name][sig_name] = set()
+                    #lbl_map[lbl_char]['records'][rec_name][sig_name] = set()
+                    lbl_map[lbl_char]['records'][rec_name][sig_name] = 0
 
                 if sig_name not in lbl_map[lbl_char]['signals']:
-                    lbl_map[lbl_char]['signals'][sig_name] = set()
+                    # lbl_map[lbl_char]['signals'][sig_name] = set()
+                    lbl_map[lbl_char]['signals'][sig_name] = 0
 
-                lbl_map[lbl_char]['records'][rec_name][sig_name].add(beat_idx)
-                lbl_map[lbl_char]['signals'][sig_name].add(beat_idx)
+                # lbl_map[lbl_char]['records'][rec_name][sig_name].add(beat_idx)
+                # lbl_map[lbl_char]['signals'][sig_name].add(beat_idx)
+                lbl_map[lbl_char]['records'][rec_name][sig_name] += 1
+                lbl_map[lbl_char]['signals'][sig_name] += 1
                 lbl_map[lbl_char]['beats'].add(beat_idx)
 
                 if sig_name not in sig_map:
@@ -583,23 +646,15 @@ def db_info_to_csv(path_ds, db_name, sig_str, sig_map, lbl_map, max_samples, bea
 
         csv.write(',{},,{}\n\n'.format('Total', total))
 
-    '''
-        total = 0
-        csv.write(',{}\n'.format(sig))
-        for lbl in sig_map[sig]['labels']:
-            csv.write(',,{},{}\n'.format(lbl, len(sig_map[sig]['labels'][lbl])))
-            total += len(sig_map[sig]['labels'][lbl])
-
-        csv.write(',{},,{}\n\n'.format('Total', total))
-    '''
-
     csv.write('Classes\n')
     for lbl in lbl_map:
         total = 0
         csv.write(',{}\n'.format(lbl))
         for sig in lbl_map[lbl]['signals']:
-            csv.write(',,{},{}\n'.format(sig, len(lbl_map[lbl]['signals'][sig])))
-            total += len(lbl_map[lbl]['signals'][sig])
+            # csv.write(',,{},{}\n'.format(sig, len
+            # total += len(lbl_map[lbl]['signals'][sig])
+            csv.write(',,{},{}\n'.format(sig, lbl_map[lbl]['signals'][sig]))
+            total += lbl_map[lbl]['signals'][sig]
 
         csv.write(',{},,{}\n\n'.format('Total', total))
 
@@ -607,6 +662,13 @@ def db_info_to_csv(path_ds, db_name, sig_str, sig_map, lbl_map, max_samples, bea
     for sig in sig_map:
         csv.write(',{}\n'.format(sig))
         for rec in sig_map[sig]['records']:
+            csv.write(',,{}\n'.format(rec))
+
+    csv.write('\n')
+
+    for lbl in lbl_map:
+        csv.write(',{}\n'.format(lbl))
+        for rec in lbl_map[lbl]['records']:
             csv.write(',,{}\n'.format(rec))
 
     csv.write('Max Sample\n')
@@ -658,11 +720,58 @@ def pad_signal(sig, sig_len):
         front_pad = int(floor(pad / 2.0))
         back_pad = int(ceil(pad / 2.0))
 
-    return np.concatenate(
-        (np.zeros(front_pad, dtype=np.float32), np.array(sig, dtype=np.float32), np.zeros(back_pad, dtype=np.float32)))
+    return np.concatenate(np.zeros(front_pad, dtype=np.float32), np.array(sig, dtype=np.float32), np.zeros(back_pad, dtype=np.float32))
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 if __name__ == '__main__':
     main()
 
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_balanced_indices(lbl_map, nb_rows, percent_test, is_balanced):
+
+    if is_balanced:
+        balanced_indices = {}
+        for lbl_char in tqdm(lbl_map, desc='Creating balanced datasets'):  # Get balanced data for all classes.
+            balanced_indices[lbl_char] = deque(maxlen=nb_rows)
+            if len(lbl_map[lbl_char]['beats']) < nb_rows:  # We must not delete from pool until oversampling is finished.
+                percent_sample = 1.0
+                oversampled = deque()
+                while len(balanced_indices[lbl_char]) < nb_rows:  # Ensure we fill the class with all samples.
+                    if len(lbl_map[lbl_char]['beats']) > nb_rows - len(balanced_indices[lbl_char]):
+                        percent_sample = 1.0 - (len(balanced_indices[lbl_char]) / float(nb_rows))
+
+                    for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                        for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+
+                            samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_sample)))
+                            balanced_indices[lbl_char].extend(samples)
+                            oversampled.extend(samples)
+
+                # It's ok to remove used samples from pool after finishing oversampling.
+                oversampled = set(oversampled)
+                for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                    for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+                        lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(oversampled)
+                        lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(oversampled)
+
+                lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(oversampled)
+
+            else:  # Don't have to do any oversampling.
+                percent_sample = float(nb_rows) / len(lbl_map[lbl_char]['beats'])
+                if percent_test < 1:  # Generating a test set
+                    percent_sample *= percent_test
+
+                for rec_name in lbl_map[lbl_char]['records']:  # We want an even sample across all records.
+                    for sig_name in lbl_map[lbl_char]['records'][rec_name]:  # We want an even sample across all signals.
+                        samples = random.sample(lbl_map[lbl_char]['records'][rec_name][sig_name], int(ceil(len(lbl_map[lbl_char]['records'][rec_name][sig_name]) * percent_test)))
+
+                        balanced_indices[lbl_char].extend(samples)
+
+                        # We must remove samples from pool so they are not reused.
+                        lbl_map[lbl_char]['records'][rec_name][sig_name] = lbl_map[lbl_char]['records'][rec_name][sig_name].difference(samples)
+                        lbl_map[lbl_char]['signals'][sig_name] = lbl_map[lbl_char]['signals'][sig_name].difference(samples)
+                        lbl_map[lbl_char]['beats'] = lbl_map[lbl_char]['beats'].difference(samples)
+
+    return lbl_map, balanced_indices
