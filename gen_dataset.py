@@ -78,6 +78,7 @@ def main():
     argsdict = vars(args)
 
     gen_png = argsdict['gen_png']
+    gen_test = argsdict['gen_test']
     pad_random = argsdict['pad']
     pre_ann = argsdict['pre_ann']
     post_ann = argsdict['post_ann']
@@ -250,7 +251,7 @@ def gen_balanced_dataset(lbl_map, beats, max_samples, argsdict):
     nb_rows = int(round(dataset_len / len(lbl_map)))
     for i in trange(nb_datasets, desc='Generating datasets'):
         if total_beats > dataset_len:
-            nb_rows = min((total_beats - (i * nb_rows * len(lbl_map)) / len(lbl_map)), nb_rows)
+            nb_rows = min((total_beats - (i * nb_rows * len(lbl_map))) / len(lbl_map), nb_rows)
 
         nb_test_rows = 0
         test_beats = []
@@ -719,7 +720,7 @@ def pad_signal(sig, sig_len):
         front_pad = int(floor(pad / 2.0))
         back_pad = int(ceil(pad / 2.0))
 
-    return np.concatenate(np.zeros(front_pad, dtype=np.float32), np.array(sig, dtype=np.float32), np.zeros(back_pad, dtype=np.float32))
+    return np.concatenate((np.zeros(front_pad, dtype=np.float32), np.array(sig, dtype=np.float32), np.zeros(back_pad, dtype=np.float32)))
 
 
 # ----------------------------------------------------------------------------------------------------------------------
