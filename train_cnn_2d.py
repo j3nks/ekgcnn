@@ -1,22 +1,21 @@
 from __future__ import print_function
 
+import argparse
 import os
 import random
-import sys
 from collections import deque
-import argparse
-import h5py
+from math import sqrt
+
 import matplotlib.pyplot as plt
 import numpy as np
 from keras.callbacks import EarlyStopping, ModelCheckpoint
-from keras.layers.convolutional import Convolution2D, MaxPooling2D, ZeroPadding2D, AveragePooling2D
-from keras.layers.core import Dense, Dropout, Activation, Flatten, SpatialDropout2D
+from keras.layers.convolutional import Convolution2D, MaxPooling2D, ZeroPadding2D
+from keras.layers.core import Dense, Dropout, Activation, Flatten
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential
 from keras.optimizers import SGD
 from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.visualize_util import plot
-from sklearn.utils import shuffle, check_consistent_length
 
 rng_seed = 1337
 random.seed(rng_seed)
@@ -27,12 +26,12 @@ np.random.seed(seed=rng_seed)
 def main():
     parser = argparse.ArgumentParser(description='Keras CNN Training!')
     parser.add_argument('-d', '--data_augmentation', action='store_true', default=False, help='Use data augmentation.')
+    parser.add_argument('-j', '--join_train', action='store_true', default=False, help='Join all the training datasets.')
     parser.add_argument('--model', action='store', type=str, default='simple', help='Local path to where datasets are stored.')
     parser.add_argument('--test_file', action='store', type=str, default='', help='Local path to where datasets are stored.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/datasets/', help='Local path to where datasets are stored.')
     parser.add_argument('--batch_size', action='store', type=int, default=32, help='Number of seconds to use before annotation.')
     parser.add_argument('--epochs', action='store', type=int, default=30, help='Number of seconds to use after annotation.')
-    parser.add_argument('--pixels', action='store', type=int, default=256, help='Number of pixels for rows and cols of image.')
     parser.add_argument('--channels', action='store', type=int, default=1, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--early_stop_var', action='store', type=str, default='val_loss', help='Valid options: val_loss, val_acc, loss, and acc.')
     parser.add_argument('--early_stop_patience', action='store', type=int, default=2, help='Valid options: val_loss, val_acc, loss, and acc.')
@@ -41,9 +40,9 @@ def main():
     argsdict = vars(args)
 
     data_augmentation = argsdict['data_augmentation']
+    join_train = argsdict['join_train']
     batch_size = argsdict['batch_size']
     nb_epoch = argsdict['epochs']
-    img_rows = img_cols = argsdict['pixels']
     img_channels = argsdict['channels']
     test_file = argsdict['test_file']
     model_str = argsdict['model']
@@ -60,19 +59,18 @@ def main():
         print('Dataset path does not exist: {}'.format(path_dataset))
         exit()
 
-    files = deque()
+    train_files = deque()
     x_test = None
     # Get the test files first.
     for f in os.listdir(path_dataset):
-        if f == test_file:
-            if f.endswith('.npz') or f.endswith('.npy'):
+        if f.endswith('.npz') or f.endswith('.npy'):
+            if f == test_file:
                 print('Opening/uncompressing test dataset...')
                 ds = np.load(path_dataset + f)
 
                 if 'x_test' in ds:
                     x_test = ds['x_test']
                     y_test = ds['y_test']
-                    files.append(f)
                 elif 'x_train' in ds:
                     x_test = ds['x_train']
                     y_test = ds['y_train']
@@ -81,35 +79,16 @@ def main():
                     y_test = ds['labels']
 
                 ds.close()
-        else:
-            files.append(f)
+            else:
+                train_files.append(f)
 
     if x_test is None:
         print('Test file not found: {}!'.format(test_file))
         exit()
 
-    print('Opening/uncompressing/joining training dataset...')
-    x_train, y_train = join_datasets(path_dataset, files)
+    img_rows = img_cols = int(sqrt(x_test.shape[1]))
 
-    # x_train, y_train = shuffle(x_train, y_train, random_state=rng_seed)  # TODO: Should probably do an inplace shuffle here.
-
-    print('Perfoming in-place shuffle...')
-    # Inplace shuffle. Less memory but takes longer.
-    rng_state = np.random.get_state()
-    np.random.shuffle(x_train)
-    np.random.set_state(rng_state)
-    np.random.shuffle(y_train)
-
-    # Reshape for Keras
-    x_train = x_train.reshape(x_train.shape[0], img_channels, img_rows, img_cols)
-    x_test = x_test.reshape(x_test.shape[0], img_channels, img_rows, img_cols)
-
-    print('X_train shape:', x_train.shape)
-    print('Y_train shape:', y_train.shape)
-    print('X_test shape:', x_test.shape)
-    print('Y_test shape:', y_test.shape)
-
-    # ------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------------------------------------
     # Get Model and Compile
     if model_str == 'simple':
         model = get_simple_cnn(img_rows, img_cols)
@@ -143,33 +122,44 @@ def main():
             horizontal_flip=False,  # randomly flip images
             vertical_flip=True)  # randomly flip images
 
-    # ------------------------------------------------------------------------------------------------------------------
-    # Train the Model
+    print('X_test shape:', x_test.shape)
+    print('Y_test shape:', y_test.shape)
 
-    if not data_augmentation:
-        print('Not using data augmentation.')
-        history = model.fit(x_train, y_train,
-            batch_size=batch_size,
-            nb_epoch=nb_epoch,
-            validation_data=(x_test, y_test),
-            # validation_split=0.2,
-            # shuffle='batch',
-            shuffle=True,
-            verbose=1,
-            callbacks=[checkpointer, early_stopping])
+    x_test = x_test.reshape(x_test.shape[0], img_channels, img_rows, img_cols)
+    
+    if join_train:
+        print('Opening train dataset...')
+
+        x_train, y_train = join_dataset(path_dataset, train_files)
+
+        print('X_train shape:', x_train.shape)
+        print('Y_train shape:', y_train.shape)
+
+        history = train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
     else:
-        print('Using real-time data augmentation.')
+        for i, f in enumerate(train_files):
+            if f.endswith('.npz') or f.endswith('.npy'):
+                print('Opening/uncompressing train dataset {} of {}...'.format(i + 1, len(train_files)))
+                ds = np.load(path_dataset + f)
 
-        # Compute quantities required for feature-wise normalization
-        # (std, mean, and principal components if ZCA whitening is applied)
-        datagen.fit(x_train)
+                if 'x_train' in ds:
+                    x_train = ds['x_train']
+                    y_train = ds['y_train']
+                elif 'images' in ds:
+                    x_train = ds['images']
+                    y_train = ds['labels']
+                else:
+                    ds.close()
+                    continue
 
-        # fit the model on the batches generated by datagen.flow()
-        history = model.fit_generator(datagen.flow(x_train, y_train,
-            batch_size=batch_size),
-            samples_per_epoch=x_train.shape[0],
-            nb_epoch=nb_epoch,
-            validation_data=(x_test, y_test))
+                ds.close()
+            else:
+                continue
+
+            print('X_train shape:', x_train.shape)
+            print('Y_train shape:', y_train.shape)
+
+            history = train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
 
     # ------------------------------------------------------------------------------------------------------------------
     # Load most accurate weights back into model from file.
@@ -186,7 +176,7 @@ def main():
     # model.save_weights(path_dataset + db_name + '_vgg19_weights.h5', overwrite=True)
 
     # ------------------------------------------------------------------------------------------------------------------
-    # Evaluate the model
+    # Evaluate the model    
     loss, accuracy = model.evaluate(x_test, y_test, verbose=1)
     print('loss: ', loss)
     print('accuracy: ', accuracy)
@@ -286,7 +276,64 @@ def main():
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def join_datasets(path_dataset, files):
+def train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
+    """
+    Trains the Model with the given list of train files.
+    :param model:
+    :param x_train:
+    :param y_train:
+    :param x_test:
+    :param y_test:
+    :param img_channels:
+    :param img_rows:
+    :param img_cols:
+    :param data_augmentation:
+    :param datagen:
+    :return:
+    """
+
+    # x_train, y_train = shuffle(x_train, y_train, random_state=rng_seed)  # TODO: Should probably do an inplace shuffle here.
+
+    # Inplace shuffle. Less memory but takes longer.
+    # print('Performing in-place shuffle...')
+    # rng_state = np.random.get_state()
+    # np.random.shuffle(x_train)
+    # np.random.set_state(rng_state)
+    # np.random.shuffle(y_train)
+
+    # Reshape for Keras
+    x_train = x_train.reshape(x_train.shape[0], img_channels, img_rows, img_cols)
+
+    if not data_augmentation:
+        print('Not using data augmentation.')
+        history = model.fit(x_train, y_train,
+                            batch_size=batch_size,
+                            nb_epoch=nb_epoch,
+                            validation_data=(x_test, y_test),
+                            # validation_split=0.2,
+                            # shuffle='batch',
+                            shuffle=True,
+                            verbose=1,
+                            callbacks=[checkpointer, early_stopping])
+    else:
+        print('Using real-time data augmentation.')
+
+        # Compute quantities required for feature-wise normalization
+        # (std, mean, and principal components if ZCA whitening is applied)
+        datagen.fit(x_train)
+
+        # fit the model on the batches generated by datagen.flow()
+        history = model.fit_generator(datagen.flow(x_train, y_train,
+                                                   batch_size=batch_size),
+                                      samples_per_epoch=x_train.shape[0],
+                                      nb_epoch=nb_epoch,
+                                      validation_data=(x_test, y_test))
+
+    return history
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def join_dataset(path_dataset, files):
     """
     Numpy concatenate like with less memory. Very slow!
     :param path_dataset:
@@ -327,8 +374,8 @@ def join_datasets(path_dataset, files):
                 ds.close()
                 continue
 
-            x_train[ds_index:ds_index+y.shape[0]] = x
-            y_train[ds_index:ds_index+y.shape[0]] = y
+            x_train[ds_index:ds_index+y.shape[0], :] = x
+            y_train[ds_index:ds_index+y.shape[0], :] = y
             ds_index += len(y)
 
     return x_train, y_train
@@ -347,23 +394,21 @@ def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
 
     print('Using Simple CNN Model!')
 
-    nb_filers = [8, 32, 64, 512, 512, 256, 512, 2048]
+    nb_filers = [8, 32, 64, 512, 512, 256, 512, 1024]
     model = Sequential()
+
     model.add(Convolution2D(nb_filers[0], 3, 3, subsample=(1, 1), border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(nb_filers[0], 3, 3, subsample=(1, 1), border_mode='same'))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2), border_mode='same'))
     model.add(Dropout(0.25))
 
     model.add(Convolution2D(nb_filers[1], 3, 3, subsample=(1, 1), border_mode='same'))
     model.add(Activation('relu'))
+    model.add(Convolution2D(nb_filers[1], 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(AveragePooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     model.add(Dropout(0.25))
 
     # model.add(Convolution2D(nb_filers[3], 3, 3, subsample=(1, 1), border_mode='same'))
