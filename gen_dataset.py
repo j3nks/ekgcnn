@@ -6,10 +6,10 @@ import os
 import random
 import sys
 from collections import deque
+from copy import deepcopy
 from math import ceil, floor
-from copy import  deepcopy
-import matplotlib
 
+import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,9 +17,9 @@ import pywfdb
 from PIL import Image
 from tqdm import *
 
-rng_seed = 2017
+rng_seed = 11102017
 random.seed(rng_seed)
-np.random.seed(seed=rng_seed)
+np.random.seed(rng_seed)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -67,6 +67,7 @@ def main():
     parser.add_argument('--pad', action='store_true', default=False, help='Pad randomly in the front and back when oversampling.')
     parser.add_argument('--pre_ann', action='store', type=float, default=1.1, help='Number of seconds to use before annotation.')
     parser.add_argument('--post_ann', action='store', type=float, default=1.1, help='Number of seconds to use after annotation.')
+    parser.add_argument('--max_sample', action='store', type=int, default=1400, help='Max sample size (length) of signal.')
     parser.add_argument('--pixels', action='store', type=int, default=256, help='Number of pixels for rows and cols of image.')
     parser.add_argument('--percent_test', action='store', type=float, default=0.2, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/', help='Local path to where PhysioNet databses are stored.')
@@ -82,11 +83,12 @@ def main():
     pad_random = argsdict['pad']
     pre_ann = argsdict['pre_ann']
     post_ann = argsdict['post_ann']
+    max_sample = argsdict['max_sample']
     is_balanced = argsdict['is_balanced']
 
     sig_list = set(argsdict['signals'])
     signals_str = '_'.join(sig_list).lower()
-    signals_str = '{}{}'.format('balanced_' if is_balanced else '', 'all' if signals_str == '' else signals_str)
+    signals_str = '{}{}{}'.format('balanced_' if is_balanced else '', 'all' if signals_str == '' else signals_str,  '_pad' if pad_random else '')
 
     db_name = argsdict['db']
     path_db = '{}db/{}/'.format(argsdict['path'], db_name)
@@ -121,7 +123,7 @@ def main():
         if f.endswith('.dat'):
             files.append(f.split('.')[0])
 
-    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, sig_list, pre_ann, post_ann, pad_random)
+    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, sig_list, pre_ann, post_ann, max_sample, pad_random)
 
     if len(sig_map) == 0 or len(lbl_map) == 0:
         print('No signals found!')
@@ -185,27 +187,28 @@ def gen_dataset(lbl_map, beats, argsdict):
     dataset_beats = np.array(dataset_beats)
     np.random.shuffle(dataset_beats)
 
-    # Deal with padding.
-    dataset_beats = randomize_beats(dataset_beats, pad_random, [])
+    if pad_random:
+        # Deal with padding
+        dataset_beats = randomize_beats(dataset_beats, [])
 
     # To save memory we do signals first then images.
     if gen_signals:
 
         signal_len = get_max_len(dataset_beats)
-        sig_test, y_test = get_dataset(path_ds, dataset_beats, signal_len, gen_signals, False, False, None, False)
+        sig_test, y_test = get_signal_dataset(dataset_beats, signal_len)
 
         print('Compressing signals to file...')
-        np.savez_compressed('{}signals_{}_{}_test'.format(path_ds, db_name, signals_str), x_test=sig_test, y_test=y_test)
+        np.savez_compressed('{}signals_{}_{}_test_{}_{}'.format(path_ds, db_name, signals_str, y_test.shape[0], img_pixels), x_test=sig_test, y_test=y_test)
 
         # Free Memory
         del y_test
         del sig_test
 
     if gen_images:
-        x_test, y_test = get_dataset(path_ds + 'test/', dataset_beats, None, False, gen_images, gen_png, img_pixels, False)
+        x_test, y_test = get_image_dataset(path_ds + 'test/', dataset_beats, gen_png, img_pixels, False)
 
         print('Compressing datasets...')
-        np.savez_compressed('{}images_{}_{}_test'.format(path_ds, db_name, signals_str), x_test=x_test, y_test=y_test)
+        np.savez_compressed('{}images_{}_{}_test_{}_{}'.format(path_ds, db_name, signals_str, y_test.shape[0], img_pixels), x_test=x_test, y_test=y_test)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -215,6 +218,7 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
     gen_test = argsdict['gen_test']
     gen_png = argsdict['gen_png']
     pad_random = argsdict['pad']
+    max_sample = argsdict['max_sample']
     img_pixels = argsdict['pixels']
     percent_test = argsdict['percent_test']
     dataset_len = argsdict['dataset_len']
@@ -228,15 +232,8 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
         nb_beats[idx] = len(lbl_map[lbl_char]['beats'])
 
     nb_beats.sort(reverse=True)
-
     max_rows = nb_beats[0]
-
-    # Get a list of labels that are less than the number of desired images/signals.
-    pad_list = set()
-    if pad_random:
-        for lbl_char in lbl_map:
-            if max_rows > len(lbl_map[lbl_char]['beats']):
-                pad_list.add(lbl_char)
+    nb_beats.sort()
 
     # Loop to break up large datasets into memory manageable chunks.
     total_beats = max_rows * len(lbl_map)  # TODO: We might not want to do it this way?
@@ -253,6 +250,13 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
         nb_datasets = int(min(ceil(total_beats / dataset_len), nb_datasets))
 
     nb_rows = int(round(dataset_len / len(lbl_map)))
+
+    # Get a list of labels that are less than the number of desired rows.
+    pad_list = set()
+    for lbl_char in lbl_map:
+        if nb_rows * nb_datasets > len(lbl_map[lbl_char]['beats']):
+            pad_list.add(lbl_char)
+
     for i in trange(nb_datasets, desc='Generating datasets'):
         if total_beats > dataset_len:
             nb_rows = min(int(round((total_beats - (i * nb_rows * len(lbl_map))) / len(lbl_map))), nb_rows)
@@ -264,12 +268,16 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
             nb_test_rows = int(nb_beats[0] * percent_test)
 
             lbl_map, test_beats, test_indices = get_balanced_beats(lbl_map, beats, nb_test_rows, pad_list)
-            test_beats = randomize_beats(test_beats, pad_random, pad_list)
+            
+            if pad_random:
+                test_beats = randomize_beats(test_beats, pad_list)
 
         # Generate train dataset beats.
         nb_train_rows = nb_rows - nb_test_rows
         lbl_map, train_beats, train_indices = get_balanced_beats(lbl_map, beats, nb_train_rows, pad_list)
-        train_beats = randomize_beats(train_beats, pad_random, pad_list)
+        
+        if pad_random:
+            train_beats = randomize_beats(train_beats, pad_list)
 
         # To save memory we do signals first then images.
         if gen_signals:
@@ -277,22 +285,26 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
             # Get max signal length.
             # signal_len = sorted(max_samples, key=lambda b: b.length, reverse=True)[0].length  # TODO: Can probably just iterate through the beats to find the max signal length.
 
-            signal_len = max(get_max_len(test_beats), get_max_len(train_beats))
+            if max_sample == 0:
+                signal_len = get_max_len(train_beats)
+            else:
+                signal_len = max_sample
 
             if gen_test:
-                sig_test, y_test = get_dataset(path_ds, test_beats, signal_len, gen_signals, False, False, None, True)
+                signal_len = max(get_max_len(test_beats), signal_len)
+                sig_test, y_test = get_signal_dataset(test_beats, signal_len)
 
-            sig_train, y_train = get_dataset(path_ds, test_beats, signal_len, gen_signals, False, False, None, False)
+            sig_train, y_train = get_signal_dataset(train_beats, signal_len)
 
             # print('Compressing signals to file...')
             if gen_test:
-                np.savez_compressed('{}signals_{}_{}_train_test_{}'.format(path_ds, db_name, signals_str, i), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
+                np.savez_compressed('{}signals_{}_{}_train_{}_test_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], y_test.shape[0], img_pixels, i), x_train=sig_train, y_train=y_train, x_test=sig_test, y_test=y_test)
 
                 # Free memory
                 del y_test
                 del sig_test
 
-            np.savez_compressed('{}signals_{}_{}_train_{}'.format(path_ds, db_name, signals_str, i), x_train=sig_train, y_train=y_train)
+            np.savez_compressed('{}signals_{}_{}_train_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], img_pixels, i), x_train=sig_train, y_train=y_train)
 
             # Free Memory
             del y_train
@@ -300,41 +312,43 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
 
         if gen_images:
             if gen_test:
-                x_test, y_test = get_dataset(path_ds + 'test/', test_beats, None, False, gen_images, gen_png, img_pixels, True)
+                x_test, y_test = get_image_dataset(path_ds + 'test/', test_beats, gen_png, img_pixels, True)
 
-            x_train, y_train = get_dataset(path_ds + 'train/', train_beats, None, False, gen_images, gen_png, img_pixels, False)
+            x_train, y_train = get_image_dataset(path_ds + 'train/', train_beats, gen_png, img_pixels, False)
 
             # print('\nCompressing datasets...')
             if gen_test:
-                np.savez_compressed('{}images_{}_{}_train_test_{}'.format(path_ds, db_name, signals_str, i), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
+                np.savez_compressed('{}images_{}_{}_train_{}_test_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], y_test.shape[0], img_pixels, i), x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
             else:
-                np.savez_compressed('{}images_{}_{}_train_{}'.format(path_ds, db_name, signals_str, i), x_train=x_train, y_train=y_train)
+                np.savez_compressed('{}images_{}_{}_train_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], img_pixels, i), x_train=x_train, y_train=y_train)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def randomize_beats(beats, pad_random, pad_list):
+def randomize_beats(beats, pad_list):
     rand_beats = np.empty(beats.shape[0], dtype=object)
-    if pad_random:
-        for idx, b in enumerate(tqdm(beats, mininterval=2.0, desc='Randomizing beats')):
-            sig_len = len(b.signal)
-            pad_len = b.pad
+    for idx, b in enumerate(tqdm(beats, mininterval=2.0, desc='Randomizing beats')):
+        sig_len = len(b.signal)
+        pad_len = b.pad
 
-            if b.lbl_char in pad_list:  # Create a random shift in signal
-                # shift = random.randint(0, pad_len)
-                # start = pad_len - shift
-                # end = sig_len - shift
+        if b.lbl_char in pad_list:  # Create a random shift in signal
+            # shift = random.randint(0, pad_len)
+            # start = pad_len - shift
+            # end = sig_len - shift
 
-                start = random.randint(0, pad_len)
-                end = sig_len - random.randint(0, pad_len)
+            start = random.randint(0, int(floor(pad_len / 2)))
+            end = sig_len - random.randint(0, int(ceil(pad_len / 2)))
 
-            else:  # Strip pad from class that doesn't need it.
-                start = pad_len
-                end = sig_len - pad_len
+        else:  # Strip pad from class that doesn't need it.
+            start = int(floor(pad_len / 2))
+            end = sig_len - int(ceil(pad_len / 2))
 
-            pad_beat = deepcopy(b)
-            pad_beat.signal = b.signal[start:end]
-            rand_beats[idx] = pad_beat
+        pad_beat = deepcopy(b)
+        pad_beat.signal = b.signal[start:end]
+        rand_beats[idx] = pad_beat
+
+        # signal = b.signal[start:end]
+        # rand_beats[idx] = Beat(b.rec_name, b.sig_name, b.ann_idx, b.start, b.end, b.lbl_char, b.lbl_onehot, signal, b.pad)
 
     return rand_beats
 
@@ -376,55 +390,62 @@ def get_balanced_beats(lbl_map, beats, nb_rows, pad_list):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# TODO: Split this function into two seperate funstion one for image and one for signals.
-def get_dataset(path_ds, beats, signal_len, gen_signals, gen_images, gen_png, img_pixels, is_test):
+def get_signal_dataset(beats, signal_len):
     """
-    Will generate either a signal (priority) or image dataset from given beats.
-    :param path_ds:
+    Will generate signal dataset from given beats.
     :param beats:
     :param signal_len:
-    :param gen_signals:
-    :param gen_images:
+    :return:
+    """
+
+    # Preallocate memory
+    x = np.empty((len(beats), signal_len), dtype=np.float32)
+    y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+
+    for idx, beat in enumerate(tqdm(beats, mininterval=2.0, desc='Generating signals')):
+        x[idx] = pad_signal(beat.signal, signal_len)
+
+        # Labels are the same for both images and signals
+        y[idx] = beat.lbl_onehot
+
+    return x, y
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_image_dataset(path_ds, beats, gen_png, img_pixels, is_test):
+    """
+    Will generate either a image dataset from given beats.
+    :param path_ds:
+    :param beats:
     :param gen_png:
     :param img_pixels:
     :param is_test:
     :return:
     """
 
-    if gen_signals:
-        # Preallocate memory
-        x = np.empty((len(beats), signal_len), dtype=np.float32)
-        y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+    # csv = open(path_ds + 'db_images.csv', 'wb')
+    # csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
 
-    elif gen_images:
-        # csv = open(path_ds + 'db_images.csv', 'wb')
-        # csv.write('ImageNumber, Record, SignalName, Label, Onehot\n')
+    # Preallocate memory
+    x = np.empty((len(beats), int(img_pixels ** 2)), dtype=np.float32)
+    y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
+    buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
 
-        # Preallocate memory
-        x = np.empty((len(beats), int(img_pixels ** 2)), dtype=np.float32)
-        y = np.empty((len(beats), 4), dtype=np.float32)  # TODO: Fix this magic number
-        buf = io.BytesIO()  # Memory buffer so that image doesn't have to save to disk.
+    for idx, beat in enumerate(tqdm(beats, mininterval=2.0, desc='Generating images')):
+        # Convert to image row
+        im_row = signal_to_image(path_ds, beat, idx, buf, img_pixels, gen_png, is_test)
 
-    for idx, beat in enumerate(tqdm(beats, mininterval=2.0, desc='Generating images/signals')):
-        if gen_signals:
-            x[idx] = pad_signal(beat.signal, signal_len)
+        # Assign the images to dataset
+        x[idx] = im_row / 255
 
-        elif gen_images:
-            # Convert to image row
-            im_row = signal_to_image(path_ds, beat, idx, buf, img_pixels, gen_png, is_test)
+        # Print to CSV file
+        # csv.write('{},{},{},{},[{}{}{}{}]\n'.format(beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
 
-            # Assign the images to dataset
-            x[idx] = im_row / 255
-
-            # Print to CSV file
-            # csv.write('{},{},{},{},[{}{}{}{}]\n'.format(beat.ann_idx, beat.rec_name, beat.sig_name, beat.lbl_char, beat.lbl_onehot[0], beat.lbl_onehot[1], beat.lbl_onehot[2], beat.lbl_onehot[3]))
-
-        # Labels are the same for both images and signals
+        # Labels
         y[idx] = beat.lbl_onehot
 
-    if not gen_signals and gen_images:
-        buf.close()
-        # csv.close()
+    buf.close()
+    # csv.close()
 
     return x, y
 
@@ -440,7 +461,8 @@ def signal_to_image(path_ds, beat, beat_idx, image_buffer, img_pixels, gen_png, 
     ax.axis('off')
     ax.set_xlim(0, len(beat.signal))
     # ax.set_ylim(-1.0, 1.5) # TODO: Should we set the y-axis limits?
-    ax.plot(beat.signal, color='k', linewidth=.2)  # linewidth=.01)
+    ax.plot(beat.signal, color='k', linewidth=.5)
+    # ax.plot(beat.signal, color='k', linewidth=.01)
 
     # Saving image to buffer in memory
     plt.savefig(image_buffer, dpi=img_pixels)
@@ -470,7 +492,7 @@ def signal_to_image(path_ds, beat, beat_idx, image_buffer, img_pixels, gen_png, 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Helper functions
-def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
+def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, max_sample, pad_random):
     """
     Gets stats on each record. i.e. Beat count.
     :param path_db:
@@ -478,6 +500,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
     :param sig_list:
     :param pre_ann:
     :param post_ann:
+    :param max_sample:
     :param pad_random:
     :return:
     """
@@ -485,9 +508,10 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
     record_map = {}
     sig_map = {}
     lbl_map = {}
-    max_sample = 600
     max_samples = deque()
-    max_beat = MaxSample()
+
+    if max_sample == 0:
+        max_sample = sys.maxint
 
     for rec_name in tqdm(rec_list, desc='Gathering database info'):
         rec = pywfdb.Record(path_db + rec_name)
@@ -510,39 +534,16 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
 
             if prev_ann_index == -1:
                 # Then we are on the the first annotation in the record
-                prev_r_r = 0
+                prev_r_r = ann.time
+                pre_samples = prev_r_r
             else:
                 prev_ann = annotations[prev_ann_index]
                 prev_r_r = ann.time - prev_ann.time
-
-            if next_ann_index == len(annotations):
-                # Then we are on the the last annotation in the record
-                next_r_r = 0
-            else:
-                next_ann = annotations[next_ann_index]
-                next_r_r = next_ann.time - ann.time
-
-            pre_samples = int(round(pre_ann * prev_r_r))  # Number samples to capture before annotation
-            post_samples = int(round(post_ann * next_r_r))  # Number samples to capture after annotation
-
-            if pre_samples > max_sample:
-                pre_samples = max_sample
-
-            if post_samples > max_sample:
-                post_samples = max_sample
+                pre_samples = int(round(pre_ann * prev_r_r))  # Number samples to capture before annotation
 
             lbl_char = get_annotation_char(ann)
 
-            # Index where annotation occurs
-            ann_time = ann.time
-
-            # Calculate start index of image
-            start = ann_time - pre_samples
-            if prev_r_r == 0:
-                start = 0
-
-            end = 0
-
+            is_first = True
             for sig_idx, sig_name in enumerate(rec.signal_names):
                 if len(sig_list) != 0 and sig_name.strip() not in sig_list:
                     continue
@@ -558,20 +559,51 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                 else:
                     rec_len = record_map[rec_name][sig_name]
 
-                if end == 0:  # Calculate end index of image
-                    end = ann_time + post_samples
+                if is_first:
+                    is_first = False
+                    if next_ann_index == len(annotations):
+                        # Then we are on the the last annotation in the record
+                        next_r_r = rec_len - ann.time
+                        post_samples = next_r_r
+                    else:
+                        next_ann = annotations[next_ann_index]
+                        next_r_r = next_ann.time - ann.time
+                        post_samples = int(round(post_ann * next_r_r))  # Number samples to capture after annotation
 
-                # Pad signal with %10 the length in front and back for random shifting later.
-                pad = 0
-                pad_start = start
-                pad_end = end
-                if pad_random:
-                    pad = int(round((end - start) * 0.1))
-                    pad_start -= pad
-                    pad_end += pad
+                    is_max = False
+                    if pre_samples + post_samples > max_sample:
+                        is_max = True
+                        max_pre = pre_samples
+                        max_post = post_samples
+                        max_length = pre_samples + post_samples
 
-                pad_start = max(0, pad_start)
-                pad_end = min(pad_end, rec_len)
+                        # We need to trim the signal length.
+                        trim_len = max_length - max_sample
+
+                        # Trim proportionate to signal length
+                        pre_samples -= int(round(trim_len * (pre_samples / max_length)))
+                        post_samples -= int(round(trim_len * (post_samples / max_length)))
+
+                    # Calculate start index of image
+                    start = int(max(0, ann.time - pre_samples))
+                    # Calculate end index of image
+                    end = min(ann.time + post_samples, rec_len)
+
+                    # Pad signal with %10 the length in front and back for random shifting later.
+                    pad = 0
+                    pad_start = start
+                    pad_end = end
+                    if pad_random:
+                        if end - start < max_sample:
+                            pad = int(min(round((end - start) * 0.2), max_sample - (end - start)))
+                            pad_floor = int(floor(pad / 2))
+                            pad_ceil = int(ceil(pad / 2))
+
+                            if pad_start - pad_floor < 0 or pad_end + pad_ceil > rec_len:
+                                pad = 0
+                            else:
+                                pad_start -= pad_floor
+                                pad_end += pad_ceil
 
                 # Read in the signal from the record.
                 signal = rec.read(sig_name, pad_start, pad_end - pad_start)
@@ -580,11 +612,8 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, pad_random):
                 beats.append(beat)
                 beat_idx = len(beats) - 1
 
-                # if max_beat.length < end - start:
-                #     max_beat = MaxSample(rec_name, sig_name, lbl_char, ann_idx, prev_ann_index, next_ann_index, pre_samples, post_samples, end - start, beat_idx)
-
-                if pre_samples >= max_sample or post_samples >= max_sample:
-                    max_samples.append(MaxSample(rec_name, sig_name, lbl_char, ann_idx, prev_ann_index, next_ann_index, pre_samples, post_samples, end - start, beat_idx))
+                if is_max:
+                    max_samples.append(MaxSample(rec_name, sig_name, lbl_char, ann_idx, prev_ann_index, next_ann_index, max_pre, max_post, max_length, beat_idx))
 
                 if lbl_char not in lbl_map:
                     lbl_map[lbl_char] = {'beats': set(), 'records': {}, 'signals': {}}

@@ -6,6 +6,9 @@ import random
 from collections import deque
 from math import sqrt
 
+import itertools
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from keras.callbacks import EarlyStopping, ModelCheckpoint
@@ -16,10 +19,11 @@ from keras.models import Sequential
 from keras.optimizers import SGD
 from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.visualize_util import plot
+from sklearn.metrics import classification_report, confusion_matrix
 
-rng_seed = 1337
+rng_seed = 11102017
 random.seed(rng_seed)
-np.random.seed(seed=rng_seed)
+np.random.seed(rng_seed)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -27,10 +31,11 @@ def main():
     parser = argparse.ArgumentParser(description='Keras CNN Training!')
     parser.add_argument('-d', '--data_augmentation', action='store_true', default=False, help='Use data augmentation.')
     parser.add_argument('-j', '--join_train', action='store_true', default=False, help='Join all the training datasets.')
-    parser.add_argument('--model', action='store', type=str, default='simple', help='Local path to where datasets are stored.')
-    parser.add_argument('--test_file', action='store', type=str, default='', help='Local path to where datasets are stored.')
+    parser.add_argument('--model', action='store', type=str, default='simple', help='Options: simple, zero, vgg16, vgg19, alexnet')
+    parser.add_argument('--test_file', action='store', type=str, default='', required=True, help='File to use for final results.')
+    parser.add_argument('--val_file', action='store', type=str, default='', help='If present used for early_stop and checkpointer.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/datasets/', help='Local path to where datasets are stored.')
-    parser.add_argument('--batch_size', action='store', type=int, default=32, help='Number of seconds to use before annotation.')
+    parser.add_argument('--batch_size', action='store', type=int, default=512, help='Number of seconds to use before annotation.')
     parser.add_argument('--epochs', action='store', type=int, default=30, help='Number of seconds to use after annotation.')
     parser.add_argument('--channels', action='store', type=int, default=1, help='Percentage of smallest class to use for test dataset.')
     parser.add_argument('--early_stop_var', action='store', type=str, default='val_loss', help='Valid options: val_loss, val_acc, loss, and acc.')
@@ -45,6 +50,7 @@ def main():
     nb_epoch = argsdict['epochs']
     img_channels = argsdict['channels']
     test_file = argsdict['test_file']
+    val_file = argsdict['val_file']
     model_str = argsdict['model']
     path_dataset = argsdict['path']
     early_stop_var = argsdict['early_stop_var']
@@ -61,6 +67,7 @@ def main():
 
     train_files = deque()
     x_test = None
+    x_val = None
     # Get the test files first.
     for f in os.listdir(path_dataset):
         if f.endswith('.npz') or f.endswith('.npy'):
@@ -79,6 +86,21 @@ def main():
                     y_test = ds['labels']
 
                 ds.close()
+            elif f == val_file:
+                print('Opening/uncompressing val dataset...')
+                ds = np.load(path_dataset + f)
+
+                if 'x_test' in ds:
+                    x_val = ds['x_test']
+                    y_val = ds['y_test']
+                elif 'x_train' in ds:
+                    x_val = ds['x_train']
+                    y_val = ds['y_train']
+                elif 'images' in ds:  # TODO: Remove this later after regeneration of new datasets!
+                    x_val = ds['images']
+                    y_val = ds['labels']
+
+                ds.close()
             else:
                 train_files.append(f)
 
@@ -88,10 +110,12 @@ def main():
 
     img_rows = img_cols = int(sqrt(x_test.shape[1]))
 
-# ------------------------------------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------------------------------------------------------
     # Get Model and Compile
     if model_str == 'simple':
         model = get_simple_cnn(img_rows, img_cols)
+    elif model_str == 'zero':
+        model = get_zero_cnn(img_rows, img_cols)
     elif model_str == 'vgg19':
         model = get_vgg19_model(img_rows, img_cols)
     elif model_str == 'vgg16':
@@ -101,9 +125,9 @@ def main():
     else:
         model = get_simple_cnn(img_rows, img_cols)
 
-    # let's train the model using SGD + momentum (how original).
     sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
     model.compile(loss='categorical_crossentropy', optimizer=sgd, metrics=['accuracy'])
+    # model.compile(loss='categorical_crossentropy', optimizer='adadelta', metrics=['accuracy'])
 
     early_stopping = EarlyStopping(monitor=early_stop_var, patience=early_stop_patience, verbose=1)
     checkpointer = ModelCheckpoint(monitor=checkpointer_var, filepath='{}{}_weights.hdf5'.format(path_dataset, model_str), verbose=1, save_best_only=True)
@@ -126,16 +150,22 @@ def main():
     print('Y_test shape:', y_test.shape)
 
     x_test = x_test.reshape(x_test.shape[0], img_channels, img_rows, img_cols)
+
+    if x_val is not None:
+        print('X_val shape:', x_val.shape)
+        print('Y_val shape:', y_val.shape)
+
+        x_val = x_val.reshape(x_val.shape[0], img_channels, img_rows, img_cols)
     
     if join_train:
-        print('Opening train dataset...')
+        print('Opening/uncompressing and joining train dataset...')
 
         x_train, y_train = join_dataset(path_dataset, train_files)
 
         print('X_train shape:', x_train.shape)
         print('Y_train shape:', y_train.shape)
 
-        history = train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
+        history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
     else:
         for i, f in enumerate(train_files):
             if f.endswith('.npz') or f.endswith('.npy'):
@@ -159,7 +189,7 @@ def main():
             print('X_train shape:', x_train.shape)
             print('Y_train shape:', y_train.shape)
 
-            history = train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
+            history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
 
     # ------------------------------------------------------------------------------------------------------------------
     # Load most accurate weights back into model from file.
@@ -175,58 +205,55 @@ def main():
     # Save the pre-trained weights
     # model.save_weights(path_dataset + db_name + '_vgg19_weights.h5', overwrite=True)
 
-    # ------------------------------------------------------------------------------------------------------------------
-    # Evaluate the model    
+    # if x_val is not None:
+    #     evaluate_model(path_dataset, model_str + '_val', history, model, y_train, x_val, y_val)
+    
+    evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_test)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_test):
+    """
+    Evaluate the model and print results.
+    :param path_dataset:
+    :param model_str:
+    :param history:
+    :param model:
+    :param y_train:
+    :param x_test:
+    :param y_test:
+    :return:
+    """
     loss, accuracy = model.evaluate(x_test, y_test, verbose=1)
     print('loss: ', loss)
     print('accuracy: ', accuracy)
     print()
 
-    # Predict
-    classes = model.predict_classes(x_test, verbose=1)
-    proba = model.predict_proba(x_test, verbose=1)
+    # Attain predictions from test input.
+    y_prob = model.predict_proba(x_test, verbose=1)
+    y_pred = np.argmax(y_prob, axis=1)
+    y_lbls = np.argmax(y_test, axis=1)
 
-    print()
+    # Create classification matrix
+    labels = ['N', 'S', 'V', 'F']
+    class_report = classification_report(y_lbls, y_pred, target_names=labels)
+    print(class_report)
+    with open('{}{}_classification_report.csv'.format(path_dataset, model_str), 'wb') as reportfile:
+        reportfile.write(class_report)
 
-    # ------------------------------------------------------------------------------------------------------------------
-    val_map = {0: 0, 1: 0, 2: 0, 3: 0}
-    histo = deque()
+    # Create confusion matrix
+    cm = confusion_matrix(y_lbls, y_pred)
+    np.set_printoptions(precision=2)
+
+    # Plot confusion matrix
+    plot_confusion_matrix(cm, classes=labels, title='Confusion Matrix', save_path='{}{}_confusion_matrix.png'.format(path_dataset, model_str))
+    plot_confusion_matrix(cm, classes=labels, normalize=True, title='Normalized Confusion Matrix', save_path='{}{}_normalized_confusion_matrix.png'.format(path_dataset, model_str))
+
+    # Create csv file with prediction so we can hand pick examples later.
     with open('{}{}_predictions.csv'.format(path_dataset, model_str), 'wb') as csvfile:
         csvfile.write('ImageId, PredictLabel, TestLabel, Proba\n')
-        for i, c in enumerate(classes):
-            csvfile.write(
-                '{},{},{},{},{},{},{}\n'.format(i, c, y_test[i], proba[i][0], proba[i][1], proba[i][2], proba[i][3]))
-            if c == np.argmax(y_test[i]):
-                val_map[c] += 1
-                histo.append(c)
-
-    with open('{}{}_valid.csv'.format(path_dataset, model_str), 'wb') as csvfile:
-        csvfile.write('Classs,Correct,Total,Percent\n')
-        csvfile.write('Test\n')
-
-        count_map = {0: 0, 1: 0, 2: 0, 3: 0}
-        for c in y_test:
-            count_map[int(np.argmax(c))] += 1
-
-        for c in count_map:
-            csvfile.write('{},{},{},{}\n'.format(c, val_map[c], count_map[c], float(val_map[c]) / count_map[c]))
-
-        csvfile.write('Train\n')
-
-        count_map = {0: 0, 1: 0, 2: 0, 3: 0}
-        for c in y_train:
-            count_map[int(np.argmax(c))] += 1
-
-        for c in count_map:
-            csvfile.write('{},{}\n'.format(c, count_map[c]))
-
-    counts, bins, patches = plt.hist(histo, bins=[0, 1, 2, 3, 4])
-
-    autolabel(patches, plt.gca())
-    plt.xlabel('0=N, 1=S, 2=V, 3=F')
-    plt.savefig('{}{}_hist.png'.format(path_dataset, model_str))
-    plt.show()
-    plt.close()
+        for i, c in enumerate(y_prob):
+            csvfile.write('{},{},{},{},{},{},{}\n'.format(i, c, y_test[i], y_prob[i][0], y_prob[i][1], y_prob[i][2], y_prob[i][3]))
 
     x = history.epoch
     legend = ['loss']
@@ -276,7 +303,55 @@ def main():
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
+def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion Matrix', cmap=plt.cm.Blues, save_path=None):
+    """
+    This function prints and plots the confusion matrix.
+    Adapted from http://scikit-learn.org/stable/auto_examples/model_selection/plot_confusion_matrix.html
+    :param cm:
+    :param classes:
+    :param normalize: Normalization can be applied by setting `normalize=True`.
+    :param title:
+    :param cmap:
+    :return:
+    """
+    fig = plt.figure()
+
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes)
+    plt.yticks(tick_marks, classes)
+
+    thresh = cm.max() / 2.0
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        if normalize:
+            plt.text(j, i, '{0:.2f}'.format(cm[i, j]), horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
+        else:
+            plt.text(j, i, cm[i, j], horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
+
+    # plt.tight_layout()
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+
+    if save_path is not None:
+        plt.savefig(save_path)  # , bbox_inches='tight')
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
     """
     Trains the Model with the given list of train files.
     :param model:
@@ -284,10 +359,16 @@ def train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows,
     :param y_train:
     :param x_test:
     :param y_test:
+    :param x_val:
+    :param y_val:
     :param img_channels:
     :param img_rows:
     :param img_cols:
+    :param checkpointer:
+    :param early_stopping:
     :param data_augmentation:
+    :param batch_size:
+    :param nb_epoch:
     :param datagen:
     :return:
     """
@@ -295,24 +376,28 @@ def train_model(model, x_train, y_train, x_test, y_test, img_channels, img_rows,
     # x_train, y_train = shuffle(x_train, y_train, random_state=rng_seed)  # TODO: Should probably do an inplace shuffle here.
 
     # Inplace shuffle. Less memory but takes longer.
-    # print('Performing in-place shuffle...')
-    # rng_state = np.random.get_state()
-    # np.random.shuffle(x_train)
-    # np.random.set_state(rng_state)
-    # np.random.shuffle(y_train)
+    print('Performing in-place shuffle...')
+    rng_state = np.random.get_state()
+    np.random.shuffle(x_train)
+    np.random.set_state(rng_state)
+    np.random.shuffle(y_train)
 
     # Reshape for Keras
     x_train = x_train.reshape(x_train.shape[0], img_channels, img_rows, img_cols)
+
+    if x_val is None:
+        x_val = x_test
+        y_val = y_test
 
     if not data_augmentation:
         print('Not using data augmentation.')
         history = model.fit(x_train, y_train,
                             batch_size=batch_size,
                             nb_epoch=nb_epoch,
-                            validation_data=(x_test, y_test),
+                            validation_data=(x_val, y_val),
                             # validation_split=0.2,
                             # shuffle='batch',
-                            shuffle=True,
+                            shuffle=False,
                             verbose=1,
                             callbacks=[checkpointer, early_stopping])
     else:
@@ -356,11 +441,9 @@ def join_dataset(path_dataset, files):
                 continue
 
             ds_len += len(y)
-            x_shape = x.shape
-            y_shape = y.shape
 
-    x_train = np.empty((ds_len, x_shape[1]), dtype=np.float32)
-    y_train = np.empty((ds_len, y_shape[1]), dtype=np.float32)
+    x_train = np.empty((ds_len, x.shape[1]), dtype=np.float32)
+    y_train = np.empty((ds_len, y.shape[1]), dtype=np.float32)
 
     ds_index = 0
     for f in files:
@@ -381,6 +464,57 @@ def join_dataset(path_dataset, files):
     return x_train, y_train
 
 
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_zero_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
+    """
+    Get VGG like model.
+    :param img_channels: Number of image channels in image dataset.  (Grayscale = 1)
+    :param img_rows: Number of rows in image dataset.
+    :param img_cols: Number of cols in image dataset.
+    :param nb_classes: Number of different classes in the dataset.
+    :return: Keras sequential model.
+    """
+
+    print('Using Zero Padding CNN Model!')
+    model = Sequential()
+
+    nb_conv1 = 8
+    model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
+    model.add(Convolution2D(nb_conv1, 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_conv1, 3, 3, activation='relu'))
+    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
+    
+    nb_conv2 = 16
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_conv2, 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_conv2, 3, 3, activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
+
+    # nb_conv3 = 32
+    # model.add(ZeroPadding2D((1, 1)))
+    # model.add(Convolution2D(nb_conv3, 3, 3, activation='relu'))
+    # model.add(ZeroPadding2D((1, 1)))
+    # model.add(Convolution2D(nb_conv3, 3, 3, activation='relu'))
+    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
+    
+    model.add(Flatten())
+
+    nb_dense1 = 1024
+    model.add(Dense(nb_dense1))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
+    # model.add(Dense(nb_dense1))
+    # model.add(Activation('relu'))
+    # model.add(Dropout(0.5))
+    model.add(Dense(nb_classes))
+    model.add(Activation('softmax'))
+
+    return model
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
@@ -393,59 +527,81 @@ def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
 
     print('Using Simple CNN Model!')
-
-    nb_filers = [8, 32, 64, 512, 512, 256, 512, 1024]
     model = Sequential()
 
-    model.add(Convolution2D(nb_filers[0], 3, 3, subsample=(1, 1), border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
+    nb_conv1 = 8
+    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
     model.add(Activation('relu'))
-    model.add(Convolution2D(nb_filers[0], 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same'))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2), border_mode='same'))
     model.add(Dropout(0.25))
 
-    model.add(Convolution2D(nb_filers[1], 3, 3, subsample=(1, 1), border_mode='same'))
+    nb_conv2 = 16
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same'))
     model.add(Activation('relu'))
-    model.add(Convolution2D(nb_filers[1], 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same'))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     model.add(Dropout(0.25))
 
-    # model.add(Convolution2D(nb_filers[3], 3, 3, subsample=(1, 1), border_mode='same'))
+    nb_conv3 = 16
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    model.add(Dropout(0.25))
+
+    nb_conv4 = 32
+    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    model.add(Dropout(0.25))
+
+    nb_conv5 = 32
+    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    model.add(Dropout(0.25))
+
+    nb_conv6 = 64
+    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same'))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    model.add(Dropout(0.25))
+
+    # nb_conv7 = 64
+    # model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same'))
     # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, subsample=(1, 1), border_mode='same'))
+    # model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same'))
     # model.add(Activation('relu'))
     # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
 
-    # model.add(Convolution2D(nb_filers[4], 3, 3, subsample=(1, 1), border_mode='same'))
+    # nb_conv8 = 64
+    # model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same'))
     # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_filers[4], 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
-
-    # model.add(Convolution2D(nb_filers[5], 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_filers[5], 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
-
-    # model.add(Convolution2D(nb_filers[6], 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_filers[6], 3, 3, subsample=(1, 1), border_mode='same'))
+    # model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same'))
     # model.add(Activation('relu'))
     # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
 
     model.add(Flatten())
-    # model.add(Dense(nb_filers[7]))
-    # model.add(Activation('relu'))
-    # model.add(Dropout(0.5))
-    model.add(Dense(nb_filers[7]))
+
+    nb_dense1 = 1024
+    model.add(Dense(nb_dense1))
     model.add(Activation('relu'))
     model.add(Dropout(0.5))
+    # model.add(Dense(nb_dense1))
+    # model.add(Activation('relu'))
+    # model.add(Dropout(0.5))
     model.add(Dense(nb_classes))
     model.add(Activation('softmax'))
 
@@ -463,39 +619,37 @@ def get_alexnet_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     :return: Keras sequential model.
     """
 
-    print('Using Alex-NET Model!')
+    print('Using Alex-NET Like Model!')
 
-    nb_filers = [8, 32, 128, 512, 4096]
+    # nb_filers = [96, 256, 384, 256, 4096]
+    nb_filers = [48, 128, 192, 128, 2048]
     model = Sequential()
-    model.add(Convolution2D(nb_filers[0], 11, 11, border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
-    # model.add(BatchNormalization((64,226,226)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(poolsize=(3, 3)))
 
-    model.add(Convolution2D(nb_filers[1], 7, 7, border_mode='same'))
-    # model.add(BatchNormalization((128,115,115)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(poolsize=(3, 3)))
+    model.add(Convolution2D(nb_filers[0], 11, 11, subsample=(4, 4), activation='relu', border_mode='valid', input_shape=(img_channels, img_rows, img_cols)))
+    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    # model.add(BatchNormalization(axis=1))
+    model.add(ZeroPadding2D((1, 1)))
 
-    model.add(Convolution2D(nb_filers[2], 3, 3, border_mode='same'))
-    # model.add(BatchNormalization((128,112,112)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(poolsize=(3, 3)))
+    model.add(Convolution2D(nb_filers[1], 5, 5, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    # model.add(BatchNormalization(axis=1))
+    model.add(ZeroPadding2D((1, 0, 1, 0)))
 
-    model.add(Convolution2D(nb_filers[3], 3, 3, border_mode='same'))
-    # model.add(BatchNormalization((128,108,108)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(poolsize=(3, 3)))
+    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+
+    model.add(Convolution2D(nb_filers[3], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    model.add(ZeroPadding2D((1, 0, 1, 0)))
 
     model.add(Flatten())
     model.add(Dense(nb_filers[4], init='normal'))
-    model.add(BatchNormalization(nb_filers[4]))
+    model.add(Dropout(0.5))
     model.add(Activation('relu'))
     model.add(Dense(nb_filers[4], init='normal'))
-    model.add(BatchNormalization(nb_filers[4]))
+    model.add(Dropout(0.5))
     model.add(Activation('relu'))
     model.add(Dense(nb_classes, init='normal'))
-    model.add(BatchNormalization(nb_classes))
     model.add(Activation('softmax'))
 
     return model
@@ -512,15 +666,16 @@ def get_vgg16_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     :return:
     """
 
-    print('Using VGG-16 CNN Model!')
+    print('Using VGG-16 Like Model!')
 
-    nb_filers = [8, 32, 64, 512, 1024]
+    nb_filers = [4, 16, 64, 256, 1024]
     model = Sequential()
+
     model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
     model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
     model.add(ZeroPadding2D((1, 1)))
     model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
 
     model.add(ZeroPadding2D((1, 1)))
     model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
@@ -536,21 +691,21 @@ def get_vgg16_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
     model.add(MaxPooling2D((2, 2), strides=(2, 2)))
 
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    #
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    # model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(ZeroPadding2D((1, 1)))
+    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
+    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
 
     model.add(Flatten())
     model.add(Dense(nb_filers[4], activation='relu'))
@@ -573,15 +728,15 @@ def get_vgg19_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     :return: Keras sequential model.
     """
 
-    print('Using VGG-19 CNN Model!')
+    print('Using VGG-19 Like Model!')
 
-    nb_filers = [8, 32, 128, 512, 1024]
+    nb_filers = [4, 16, 64, 256, 1024]
     model = Sequential()
     model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
     model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
     model.add(ZeroPadding2D((1, 1)))
     model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
 
     model.add(ZeroPadding2D((1, 1)))
     model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
