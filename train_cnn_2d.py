@@ -255,51 +255,72 @@ def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_t
         for i, c in enumerate(y_prob):
             csvfile.write('{},{},{},{},{},{},{}\n'.format(i, c, y_test[i], y_prob[i][0], y_prob[i][1], y_prob[i][2], y_prob[i][3]))
 
+    # Plot loss and val_loss vs epochs.
+    h = history
     x = history.epoch
-    legend = ['loss']
-    y1 = history.history['loss']
 
     fig = plt.figure(figsize=(10, 5))
-    plt.plot(x, y1, marker='.')
-    if 'val_loss' in history.history:
-        y2 = history.history['val_loss']
+    legend = ['loss']
+    y1 = h.history['loss']
+    ax = fig.add_subplot(111)
+    plt.plot(x, y1)  # , marker='.')
+    for xy in zip(x, y1):
+        ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+
+    if 'val_loss' in h.history:
         legend.append('val_loss')
-        plt.plot(x, y2, marker='.')
+        y2 = h.history['val_loss']
+        plt.plot(x, y2)  # , marker='.')
 
-        # for xy in zip(x, y2):
-        #     plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
-
-        xy = zip(x, y2)
-        xy = xy[len(xy) - 1]
-        plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+        for xy in zip(x, y2):
+            plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     plt.title('Loss over epochs')
     plt.xlabel('Epochs')
-    plt.xticks(history.epoch, history.epoch)
+    plt.xticks(h.epoch, h.epoch)
     plt.legend(legend, loc='upper right')
-
     plt.savefig('{}{}_loss.png'.format(path_dataset, model_str))
-    plt.show()
+    # plt.show()
     plt.close(fig)
 
-    x = history.epoch
+    # Plot acc and val_acc vs epochs.
+    fig = plt.figure(figsize=(10, 5))
     legend = ['acc']
+    y1 = h.history['acc']
+    ax = fig.add_subplot(111)
+    plt.plot(x, y1)  # , marker='.')
+    for xy in zip(x, y1):
+        ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(x, history.history['acc'], marker='.')
-    if 'val_acc' in history.history:
+    if 'val_acc' in h.history:
         legend.append('val_acc')
-        plt.plot(x, history.history['val_acc'], marker='.')
+        y2 = h.history['val_acc']
+        plt.plot(x, y2)  # , marker='.')
+
+        for xy in zip(x, y2):
+            plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     plt.title('Acc over epochs')
     plt.xlabel('Epochs')
     plt.ylabel('Acc')
-    plt.xticks(history.epoch, history.epoch)
+    plt.xticks(h.epoch, h.epoch)
     plt.legend(legend, loc='upper right')
-
     plt.savefig('{}{}_acc.png'.format(path_dataset, model_str))
-    plt.show()
+    # plt.show()
     plt.close(fig)
+
+    # Write the history to a file.
+    with open('{}{}_history.csv'.format(path_dataset, model_str), 'wb') as histfile:
+        header_str = 'epoch,loss,acc'
+        if 'val_loss' in h.history and 'val_acc' in h.history:
+            header_str = '{},val_loss,val_acc'.format(header_str)
+        histfile.write('{}\n'.format(header_str))
+
+        for i in x:
+            data_str = '{},{},{}'.format(i, h.history['loss'][i], h.history['acc'][i])
+            if 'val_loss' in h.history and 'val_acc' in h.history:
+                data_str = '{},{},{},'.format(data_str, h.history['val_loss'][i], h.history['val_acc'][i])
+            histfile.write('{}\n'.format(data_str))
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -462,7 +483,6 @@ def join_dataset(path_dataset, files):
             ds_index += len(y)
 
     return x_train, y_train
-
 
 
 # ----------------------------------------------------------------------------------------------------------------------
