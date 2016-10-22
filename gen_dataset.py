@@ -89,6 +89,7 @@ def main():
     sig_list = set(argsdict['signals'])
     signals_str = '_'.join(sig_list).lower()
     signals_str = '{}{}{}'.format('balanced_' if is_balanced else '', 'all' if signals_str == '' else signals_str,  '_pad' if pad_random else '')
+    signals_str = '{}_{}_{}'.format(signals_str, pre_ann, post_ann).replace('.', '')
 
     db_name = argsdict['db']
     path_db = '{}db/{}/'.format(argsdict['path'], db_name)
@@ -265,7 +266,7 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
         test_beats = []
         if gen_test:
             # Generate test dataset beats.
-            nb_test_rows = int(nb_beats[0] * percent_test)
+            nb_test_rows = int(round(nb_beats[0] * percent_test))
 
             lbl_map, test_beats, test_indices = get_balanced_beats(lbl_map, beats, nb_test_rows, pad_list)
             

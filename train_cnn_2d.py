@@ -35,12 +35,12 @@ def main():
     parser.add_argument('--test_file', action='store', type=str, default='', required=True, help='File to use for final results.')
     parser.add_argument('--val_file', action='store', type=str, default='', help='If present used for early_stop and checkpointer.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/datasets/', help='Local path to where datasets are stored.')
-    parser.add_argument('--batch_size', action='store', type=int, default=512, help='Number of seconds to use before annotation.')
+    parser.add_argument('--batch_size', action='store', type=int, default=32, help='Number of seconds to use before annotation.')
     parser.add_argument('--epochs', action='store', type=int, default=30, help='Number of seconds to use after annotation.')
     parser.add_argument('--channels', action='store', type=int, default=1, help='Percentage of smallest class to use for test dataset.')
-    parser.add_argument('--early_stop_var', action='store', type=str, default='val_loss', help='Valid options: val_loss, val_acc, loss, and acc.')
+    parser.add_argument('--early_stop_var', action='store', type=str, default='', help='Valid options: val_loss, val_acc, loss, and acc.')
     parser.add_argument('--early_stop_patience', action='store', type=int, default=2, help='Valid options: val_loss, val_acc, loss, and acc.')
-    parser.add_argument('--checkpointer_var', action='store', type=str, default='val_loss', help='Valid options: val_loss, val_acc, loss, and acc.')
+    parser.add_argument('--checkpointer_var', action='store', type=str, default='', help='Valid options: val_loss, val_acc, loss, and acc.')
     args = parser.parse_args()
     argsdict = vars(args)
 
@@ -78,6 +78,11 @@ def main():
                 if 'x_test' in ds:
                     x_test = ds['x_test']
                     y_test = ds['y_test']
+
+                    # Check for train dataset to add to list:
+                    if 'x_train' in ds:
+                        train_files.append(f)
+
                 elif 'x_train' in ds:
                     x_test = ds['x_train']
                     y_test = ds['y_train']
@@ -86,6 +91,7 @@ def main():
                     y_test = ds['labels']
 
                 ds.close()
+
             elif f == val_file:
                 print('Opening/uncompressing val dataset...')
                 ds = np.load(path_dataset + f)
@@ -108,14 +114,16 @@ def main():
         print('Test file not found: {}!'.format(test_file))
         exit()
 
+    if val_file == test_file:
+        x_val = x_test
+        y_val = y_test
+
     img_rows = img_cols = int(sqrt(x_test.shape[1]))
 
     # ------------------------------------------------------------------------------------------------------------------
     # Get Model and Compile
     if model_str == 'simple':
         model = get_simple_cnn(img_rows, img_cols)
-    elif model_str == 'zero':
-        model = get_zero_cnn(img_rows, img_cols)
     elif model_str == 'vgg19':
         model = get_vgg19_model(img_rows, img_cols)
     elif model_str == 'vgg16':
@@ -126,11 +134,17 @@ def main():
         model = get_simple_cnn(img_rows, img_cols)
 
     sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
-    model.compile(loss='categorical_crossentropy', optimizer=sgd, metrics=['accuracy'])
-    # model.compile(loss='categorical_crossentropy', optimizer='adadelta', metrics=['accuracy'])
+    # model.compile(loss='categorical_crossentropy', optimizer=sgd, metrics=['accuracy'])
+    model.compile(loss='categorical_crossentropy', optimizer='adadelta', metrics=['accuracy'])
 
-    early_stopping = EarlyStopping(monitor=early_stop_var, patience=early_stop_patience, verbose=1)
-    checkpointer = ModelCheckpoint(monitor=checkpointer_var, filepath='{}{}_weights.hdf5'.format(path_dataset, model_str), verbose=1, save_best_only=True)
+    callbacks = []
+    if early_stop_var != '':
+        early_stopping = EarlyStopping(monitor=early_stop_var, patience=early_stop_patience, verbose=1)
+        callbacks.append(early_stopping)
+
+    if checkpointer_var != '':
+        checkpointer = ModelCheckpoint(monitor=checkpointer_var, filepath='{}{}_weights.hdf5'.format(path_dataset, model_str), verbose=1, save_best_only=True)
+        callbacks.append(checkpointer)
 
     if data_augmentation:
         # This will do pre-processing and real-time data augmentation
@@ -165,7 +179,7 @@ def main():
         print('X_train shape:', x_train.shape)
         print('Y_train shape:', y_train.shape)
 
-        history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
+        history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
     else:
         for i, f in enumerate(train_files):
             if f.endswith('.npz') or f.endswith('.npy'):
@@ -189,7 +203,7 @@ def main():
             print('X_train shape:', x_train.shape)
             print('Y_train shape:', y_train.shape)
 
-            history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size, nb_epoch)
+            history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
 
     # ------------------------------------------------------------------------------------------------------------------
     # Load most accurate weights back into model from file.
@@ -243,7 +257,7 @@ def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_t
 
     # Create confusion matrix
     cm = confusion_matrix(y_lbls, y_pred)
-    np.set_printoptions(precision=2)
+    np.set_printoptions(precision=3)
 
     # Plot confusion matrix
     plot_confusion_matrix(cm, classes=labels, title='Confusion Matrix', save_path='{}{}_confusion_matrix.png'.format(path_dataset, model_str))
@@ -345,7 +359,12 @@ def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion Matrix'
 
     print(cm)
 
-    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    if normalize:
+        vmax = 1
+    else:
+        vmax = np.sum(cm, axis=1).max()
+
+    plt.imshow(cm, interpolation='nearest', vmin=0, vmax=vmax, cmap=cmap)
     plt.title(title)
     plt.colorbar()
     tick_marks = np.arange(len(classes))
@@ -355,16 +374,16 @@ def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion Matrix'
     thresh = cm.max() / 2.0
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
         if normalize:
-            plt.text(j, i, '{0:.2f}'.format(cm[i, j]), horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
+            plt.text(j, i, '{0:.3f}'.format(cm[i, j]), horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
         else:
             plt.text(j, i, cm[i, j], horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
 
-    # plt.tight_layout()
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
+    plt.tight_layout()
 
     if save_path is not None:
-        plt.savefig(save_path)  # , bbox_inches='tight')
+        plt.savefig(save_path, bbox_inches='tight')
     else:
         plt.show()
 
@@ -372,7 +391,7 @@ def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion Matrix'
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, checkpointer, early_stopping, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
+def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
     """
     Trains the Model with the given list of train files.
     :param model:
@@ -406,9 +425,9 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
     # Reshape for Keras
     x_train = x_train.reshape(x_train.shape[0], img_channels, img_rows, img_cols)
 
-    if x_val is None:
-        x_val = x_test
-        y_val = y_test
+    # if x_val is None:
+    #     x_val = x_test
+    #     y_val = y_test
 
     if not data_augmentation:
         print('Not using data augmentation.')
@@ -420,7 +439,7 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
                             # shuffle='batch',
                             shuffle=False,
                             verbose=1,
-                            callbacks=[checkpointer, early_stopping])
+                            callbacks=callbacks)
     else:
         print('Using real-time data augmentation.')
 
@@ -433,7 +452,10 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
                                                    batch_size=batch_size),
                                       samples_per_epoch=x_train.shape[0],
                                       nb_epoch=nb_epoch,
-                                      validation_data=(x_test, y_test))
+                                      validation_data=(x_test, y_test),
+                                      shuffle=False,
+                                      verbose=1,
+                                      callbacks=callbacks)
 
     return history
 
@@ -486,56 +508,6 @@ def join_dataset(path_dataset, files):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_zero_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
-    """
-    Get VGG like model.
-    :param img_channels: Number of image channels in image dataset.  (Grayscale = 1)
-    :param img_rows: Number of rows in image dataset.
-    :param img_cols: Number of cols in image dataset.
-    :param nb_classes: Number of different classes in the dataset.
-    :return: Keras sequential model.
-    """
-
-    print('Using Zero Padding CNN Model!')
-    model = Sequential()
-
-    nb_conv1 = 8
-    model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
-    model.add(Convolution2D(nb_conv1, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_conv1, 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
-    
-    nb_conv2 = 16
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_conv2, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_conv2, 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
-
-    # nb_conv3 = 32
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_conv3, 3, 3, activation='relu'))
-    # model.add(ZeroPadding2D((1, 1)))
-    # model.add(Convolution2D(nb_conv3, 3, 3, activation='relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
-    
-    model.add(Flatten())
-
-    nb_dense1 = 1024
-    model.add(Dense(nb_dense1))
-    model.add(Activation('relu'))
-    model.add(Dropout(0.5))
-    # model.add(Dense(nb_dense1))
-    # model.add(Activation('relu'))
-    # model.add(Dropout(0.5))
-    model.add(Dense(nb_classes))
-    model.add(Activation('softmax'))
-
-    return model
-
-
-# ----------------------------------------------------------------------------------------------------------------------
 def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
     Get VGG like model.
@@ -549,79 +521,68 @@ def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     print('Using Simple CNN Model!')
     model = Sequential()
 
-    nb_conv1 = 8
-    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    nb_conv2 = 16
-    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    nb_conv3 = 16
-    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    nb_conv4 = 32
-    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    nb_conv5 = 32
-    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    nb_conv6 = 64
-    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    model.add(Dropout(0.25))
-
-    # nb_conv7 = 64
-    # model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    nb_conv1 = 4
+    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', activation='relu', input_shape=(img_channels, img_rows, img_cols)))
+    # model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
 
-    # nb_conv8 = 64
-    # model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same'))
-    # model.add(Activation('relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    nb_conv2 = 16
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv3 = 32
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv4 = 64
+    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv5 = 64
+    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv6 = 128
+    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv7 = 256
+    model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    nb_conv8 = 512
+    model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
 
     model.add(Flatten())
 
-    nb_dense1 = 1024
+    nb_dense1 = nb_conv8
     model.add(Dense(nb_dense1))
     model.add(Activation('relu'))
     model.add(Dropout(0.5))
-    # model.add(Dense(nb_dense1))
-    # model.add(Activation('relu'))
-    # model.add(Dropout(0.5))
+    model.add(Dense(nb_dense1))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
     model.add(Dense(nb_classes))
     model.add(Activation('softmax'))
 
