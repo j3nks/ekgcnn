@@ -305,11 +305,12 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
                 del y_test
                 del sig_test
 
-            np.savez_compressed('{}signals_{}_{}_train_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], img_pixels, i), x_train=sig_train, y_train=y_train)
+            else:
+                np.savez_compressed('{}signals_{}_{}_train_{}_{}_{}'.format(path_ds, db_name, signals_str, y_train.shape[0], img_pixels, i), x_train=sig_train, y_train=y_train)
 
-            # Free Memory
-            del y_train
-            del sig_train
+                # Free Memory
+                del y_train
+                del sig_train
 
         if gen_images:
             if gen_test:
