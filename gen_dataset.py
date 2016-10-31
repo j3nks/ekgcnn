@@ -493,7 +493,6 @@ def signal_to_image(path_ds, beat, beat_idx, image_buffer, img_pixels, gen_png, 
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Helper functions
 def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, max_sample, pad_random):
     """
     Gets stats on each record. i.e. Beat count.
@@ -638,7 +637,7 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, max_sample, pad_
                 lbl_map[lbl_char]['beats'].add(beat_idx)
 
                 if sig_name not in sig_map:
-                    sig_map[sig_name] = {'records': set(), 'labels': {lbl_char: 1}}
+                    sig_map[sig_name] = {'records': set(), 'labels': {}}
 
                 if rec_name not in sig_map[sig_name]['records']:
                     sig_map[sig_name]['records'].add(rec_name)
@@ -703,14 +702,14 @@ def db_info_to_csv(path_ds, db_name, sig_str, sig_map, lbl_map, max_samples, bea
 
     csv.write('Records\n')
     for sig in sig_map:
-        csv.write(',{}\n'.format(sig))
+        csv.write(',{},{}\n'.format(sig, len(sig_map[sig]['records'])))
         for rec in sig_map[sig]['records']:
             csv.write(',,{}\n'.format(rec))
 
     csv.write('\n')
 
     for lbl in lbl_map:
-        csv.write(',{}\n'.format(lbl))
+        csv.write(',{},{}\n'.format(lbl, len(lbl_map[lbl]['records'])))
         for rec in lbl_map[lbl]['records']:
             csv.write(',,{}\n'.format(rec))
 

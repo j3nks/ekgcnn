@@ -32,7 +32,7 @@ def main():
     parser.add_argument('-d', '--data_augmentation', action='store_true', default=False, help='Use data augmentation.')
     parser.add_argument('-j', '--join_train', action='store_true', default=False, help='Join all the training datasets.')
     parser.add_argument('--model', action='store', type=str, default='simple', help='Options: simple, zero, vgg16, vgg19, alexnet')
-    parser.add_argument('--test_file', action='store', type=str, default='', required=True, help='File to use for final results.')
+    parser.add_argument('--test_file', action='store', type=str, default='', help='File to use for final results.')
     parser.add_argument('--val_file', action='store', type=str, default='', help='If present used for early_stop and checkpointer.')
     parser.add_argument('--path', action='store', type=str, default=r'c:/ekgdb/datasets/', help='Local path to where datasets are stored.')
     parser.add_argument('--batch_size', action='store', type=int, default=32, help='Number of seconds to use before annotation.')
@@ -60,6 +60,12 @@ def main():
     # if os.path.exists(path_images):
     #     shutil.rmtree(path_images)
 
+    if len(path_dataset.split('/')) > 1 and not path_dataset.endswith('/'):
+        path_dataset += '/'
+
+    if len(path_dataset.split('\\')) > 1 and not path_dataset.endswith('\\'):
+        path_dataset += '\\'
+
     # Get the file listing of the database files (.dat)
     if not os.path.exists(path_dataset):
         print('Dataset path does not exist: {}'.format(path_dataset))
@@ -86,9 +92,6 @@ def main():
                 elif 'x_train' in ds:
                     x_test = ds['x_train']
                     y_test = ds['y_train']
-                elif 'images' in ds:  # TODO: Remove this later after regeneration of new datasets!
-                    x_test = ds['images']
-                    y_test = ds['labels']
 
                 ds.close()
 
@@ -102,13 +105,20 @@ def main():
                 elif 'x_train' in ds:
                     x_val = ds['x_train']
                     y_val = ds['y_train']
-                elif 'images' in ds:  # TODO: Remove this later after regeneration of new datasets!
-                    x_val = ds['images']
-                    y_val = ds['labels']
 
                 ds.close()
             else:
                 train_files.append(f)
+
+    if test_file == '' and len(train_files) == 1:
+        print('Opening/uncompressing val dataset...')
+        ds = np.load(path_dataset + train_files[0])
+
+        if 'x_test' in ds:
+            x_test = ds['x_test']
+            y_test = ds['y_test']
+
+        ds.close()    	 
 
     if x_test is None:
         print('Test file not found: {}!'.format(test_file))
@@ -124,6 +134,8 @@ def main():
     # Get Model and Compile
     if model_str == 'simple':
         model = get_simple_cnn(img_rows, img_cols)
+    elif model_str == 'max':
+        model = get_max_cnn(img_rows, img_cols)
     elif model_str == 'vgg19':
         model = get_vgg19_model(img_rows, img_cols)
     elif model_str == 'vgg16':
@@ -215,12 +227,6 @@ def main():
     # Model as JSON
     json_string = model.to_json()
     open('{}{}_model.json'.format(path_dataset, model_str), 'w').write(json_string)
-
-    # Save the pre-trained weights
-    # model.save_weights(path_dataset + db_name + '_vgg19_weights.h5', overwrite=True)
-
-    # if x_val is not None:
-    #     evaluate_model(path_dataset, model_str + '_val', history, model, y_train, x_val, y_val)
     
     evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_test)
 
@@ -277,17 +283,17 @@ def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_t
     legend = ['loss']
     y1 = h.history['loss']
     ax = fig.add_subplot(111)
-    plt.plot(x, y1)  # , marker='.')
-    for xy in zip(x, y1):
-        ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+    plt.plot(x, y1, marker='.')
+    # for xy in zip(x, y1):
+    #     ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     if 'val_loss' in h.history:
         legend.append('val_loss')
         y2 = h.history['val_loss']
-        plt.plot(x, y2)  # , marker='.')
+        plt.plot(x, y2, marker='.')
 
-        for xy in zip(x, y2):
-            plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+        # for xy in zip(x, y2):
+        #     plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     plt.title('Loss over epochs')
     plt.xlabel('Epochs')
@@ -302,17 +308,17 @@ def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_t
     legend = ['acc']
     y1 = h.history['acc']
     ax = fig.add_subplot(111)
-    plt.plot(x, y1)  # , marker='.')
-    for xy in zip(x, y1):
-        ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+    plt.plot(x, y1, marker='.')
+    # for xy in zip(x, y1):
+    #     ax.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     if 'val_acc' in h.history:
         legend.append('val_acc')
         y2 = h.history['val_acc']
-        plt.plot(x, y2)  # , marker='.')
+        plt.plot(x, y2, marker='.')
 
-        for xy in zip(x, y2):
-            plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
+        # for xy in zip(x, y2):
+        #     plt.annotate('(%.3f, %.3f)' % xy, xy=xy, textcoords='data')
 
     plt.title('Acc over epochs')
     plt.xlabel('Epochs')
@@ -404,8 +410,7 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
     :param img_channels:
     :param img_rows:
     :param img_cols:
-    :param checkpointer:
-    :param early_stopping:
+    :param callbacks:
     :param data_augmentation:
     :param batch_size:
     :param nb_epoch:
@@ -463,26 +468,23 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
 # ----------------------------------------------------------------------------------------------------------------------
 def join_dataset(path_dataset, files):
     """
-    Numpy concatenate like with less memory. Very slow!
-    :param path_dataset:
-    :param files:
-    :return:
+    Concatenate all datasets in files list trying to use small memory footprint. Very slow!
+    :param path_dataset: Path the the dataset files.
+    :param files: Files to join.
+    :return: Concatenated files.
     """
     ds_len = 0
     for f in files:
         if f.endswith('.npz') or f.endswith('.npy'):
             ds = np.load(path_dataset + f)
 
-            if 'x_train' in ds:
-                x = ds['x_train']
+            if 'y_train' in ds:
                 y = ds['y_train'] 
-            elif 'images' in ds:  # TODO: Remove this later after regeneration of new datasets!
-                x = ds['images']
-                y = ds['labels']
             else:
                 ds.close()
                 continue
 
+            ds.close()
             ds_len += len(y)
 
     x_train = np.empty((ds_len, x.shape[1]), dtype=np.float32)
@@ -521,70 +523,96 @@ def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     print('Using Simple CNN Model!')
     model = Sequential()
 
-    nb_conv1 = 4
+    nb_conv1 = 8
     model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', activation='relu', input_shape=(img_channels, img_rows, img_cols)))
-    # model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
 
-    nb_conv2 = 16
+    nb_conv2 = 32
     model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
     # model.add(Dropout(0.25))
+
+    nb_conv3 = 64
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+    # model.add(Dropout(0.25))
+
+    model.add(Flatten())
+    model.add(Dense(nb_classes))
+    model.add(Activation('softmax'))
+
+    print('Filters: {}, {}, {}'.format(nb_conv1, nb_conv2, nb_conv3))
+
+    return model
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def get_max_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
+    """
+    Get VGG like model.
+    :param img_channels: Number of image channels in image dataset.  (Grayscale = 1)
+    :param img_rows: Number of rows in image dataset.
+    :param img_cols: Number of cols in image dataset.
+    :param nb_classes: Number of different classes in the dataset.
+    :return: Keras sequential model.
+    """
+
+    print('Using Max Layers CNN Model!')
+    model = Sequential()
+
+    nb_conv1 = 8
+    model.add(Convolution2D(nb_conv1, 3, 3, subsample=(1, 1), border_mode='same', activation='relu', input_shape=(img_channels, img_rows, img_cols)))
+    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2), border_mode='same'))
+
+    nb_conv2 = 32
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(Convolution2D(nb_conv2, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
     nb_conv3 = 32
     model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv3, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
     nb_conv4 = 64
     model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
-    model.add(Convolution2D(nb_conv4, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
     nb_conv5 = 64
     model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
-    model.add(Convolution2D(nb_conv5, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
     nb_conv6 = 128
     model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
-    model.add(Convolution2D(nb_conv6, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
-    nb_conv7 = 256
-    model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    nb_conv7 = 128
     model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv7, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
-    nb_conv8 = 512
-    model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
+    nb_conv8 = 256
     model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(Convolution2D(nb_conv8, 3, 3, subsample=(1, 1), border_mode='same', activation='relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
-    # model.add(Dropout(0.25))
 
     model.add(Flatten())
 
     nb_dense1 = nb_conv8
-    model.add(Dense(nb_dense1))
-    model.add(Activation('relu'))
+    model.add(Dense(nb_dense1, activation='relu'))
     model.add(Dropout(0.5))
-    model.add(Dense(nb_dense1))
-    model.add(Activation('relu'))
+    model.add(Dense(nb_dense1, activation='relu'))
     model.add(Dropout(0.5))
-    model.add(Dense(nb_classes))
-    model.add(Activation('softmax'))
+    model.add(Dense(nb_classes, activation='softmax'))
+
+    print('Filters: {}, {}, {}, {}, {}, {}, {}, {}'.format(nb_conv1, nb_conv2, nb_conv3, nb_conv4, nb_conv5, nb_conv6, nb_conv7, nb_conv8))
 
     return model
 
@@ -601,37 +629,40 @@ def get_alexnet_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
 
     print('Using Alex-NET Like Model!')
-
-    # nb_filers = [96, 256, 384, 256, 4096]
-    nb_filers = [48, 128, 192, 128, 2048]
     model = Sequential()
 
-    model.add(Convolution2D(nb_filers[0], 11, 11, subsample=(4, 4), activation='relu', border_mode='valid', input_shape=(img_channels, img_rows, img_cols)))
+    nb_filters = [96, 256, 384, 256, 4096]
+    # nb_filters = [48, 128, 192, 128, 2048]
+    # nb_filters = [24, 64, 96, 64, 1024]
+
+    model.add(Convolution2D(nb_filters[0], 11, 11, subsample=(4, 4), activation='relu', border_mode='valid', input_shape=(img_channels, img_rows, img_cols)))
     model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
     # model.add(BatchNormalization(axis=1))
     model.add(ZeroPadding2D((1, 1)))
 
-    model.add(Convolution2D(nb_filers[1], 5, 5, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[1], 5, 5, subsample=(1, 1), activation='relu', border_mode='same'))
     model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
     # model.add(BatchNormalization(axis=1))
     model.add(ZeroPadding2D((1, 0, 1, 0)))
 
-    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
-    model.add(Convolution2D(nb_filers[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
 
-    model.add(Convolution2D(nb_filers[3], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, subsample=(1, 1), activation='relu', border_mode='same'))
     model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
     model.add(ZeroPadding2D((1, 0, 1, 0)))
 
     model.add(Flatten())
-    model.add(Dense(nb_filers[4], init='normal'))
+    model.add(Dense(nb_filters[4], init='normal'))
     model.add(Dropout(0.5))
     model.add(Activation('relu'))
-    model.add(Dense(nb_filers[4], init='normal'))
+    model.add(Dense(nb_filters[4], init='normal'))
     model.add(Dropout(0.5))
     model.add(Activation('relu'))
     model.add(Dense(nb_classes, init='normal'))
     model.add(Activation('softmax'))
+
+    print('Filters: {}, {}, {}, {}, {}'.format(nb_filters[0], nb_filters[1], nb_filters[2], nb_filters[3], nb_filters[4]))
 
     return model
 
@@ -648,52 +679,42 @@ def get_vgg16_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
 
     print('Using VGG-16 Like Model!')
-
-    nb_filers = [4, 16, 64, 256, 1024]
     model = Sequential()
 
-    model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
-    model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
+    # nb_filters = [64, 256, 512, 512, 4096]
+    nb_filters = [4, 32, 64, 128, 1024]
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[0], 3, 3, activation='relu', border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
+    model.add(Convolution2D(nb_filters[0], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[1], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[1], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
     model.add(Flatten())
-    model.add(Dense(nb_filers[4], activation='relu'))
+    model.add(Dense(nb_filters[4], activation='relu'))
     model.add(Dropout(0.5))
-    model.add(Dense(nb_filers[4], activation='relu'))
+    model.add(Dense(nb_filters[4], activation='relu'))
     model.add(Dropout(0.5))
     model.add(Dense(nb_classes, activation='softmax'))
+
+    print('Filters: {}, {}, {}, {}, {}'.format(nb_filters[0], nb_filters[1], nb_filters[2], nb_filters[3], nb_filters[4]))
 
     return model
 
@@ -710,67 +731,55 @@ def get_vgg19_model(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
 
     print('Using VGG-19 Like Model!')
-
-    nb_filers = [4, 16, 64, 256, 1024]
     model = Sequential()
-    model.add(ZeroPadding2D((1, 1), input_shape=(img_channels, img_rows, img_cols)))
-    model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[0], 3, 3, activation='relu'))
-    model.add(MaxPooling2D(pool_size=(4, 4), strides=(2, 2)))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[1], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    # nb_filters = [64, 256, 512, 512, 4096]
+    nb_filters = [8, 16, 32, 64, 1024]
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[2], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[0], 3, 3, activation='relu', border_mode='same', input_shape=(img_channels, img_rows, img_cols)))
+    model.add(Convolution2D(nb_filters[0], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[1], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[1], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(nb_filers[3], 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[2], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
+
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(Convolution2D(nb_filters[3], 3, 3, activation='relu', border_mode='same'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), border_mode='same'))
 
     model.add(Flatten())
-    model.add(Dense(nb_filers[4], activation='relu'))
+    model.add(Dense(nb_filters[4], activation='relu'))
     model.add(Dropout(0.5))
-    model.add(Dense(nb_filers[4], activation='relu'))
+    model.add(Dense(nb_filters[4], activation='relu'))
     model.add(Dropout(0.5))
     model.add(Dense(nb_classes, activation='softmax'))
+
+    print('Filters: {}, {}, {}, {}, {}'.format(nb_filters[0], nb_filters[1], nb_filters[2], nb_filters[3], nb_filters[4]))
 
     return model
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def get_class_indeces(dataset_labels):
+def get_class_indices(dataset_labels):
     """
-    Count the number of beats for each class and bin them into a Dict with associated indeces.
+    Count the number of beats for each class and bin them into a Dict with associated indices.
     :param dataset_labels: Dataset to bin labels into dict with associated indices.
-    :return: Dict where key is class and value is list of indeces.
+    :return: Dict where key is class and value is list of indices.
     """
     class_indeces = {'N': [], 'S': [], 'V': [], 'F': []}
     for idx, label in enumerate(dataset_labels):
@@ -790,6 +799,12 @@ def get_class_indeces(dataset_labels):
 
 # ----------------------------------------------------------------------------------------------------------------------
 def autolabel(rects, ax):
+    """
+    Labels histograms with value on top of bar.
+    :param rects: The list of bars
+    :param ax: The axis object of plot.
+    :return:
+    """
     # Get y-axis height to calculate label position from.
     (y_bottom, y_top) = ax.get_ylim()
     y_height = y_top - y_bottom
