@@ -6,7 +6,6 @@ import os
 import random
 import sys
 from collections import deque
-from copy import deepcopy
 from math import ceil, floor
 
 import matplotlib
@@ -80,6 +79,7 @@ def main():
 
     gen_png = argsdict['gen_png']
     gen_test = argsdict['gen_test']
+    gen_records = argsdict['gen_records']
     pad_random = argsdict['pad']
     pre_ann = argsdict['pre_ann']
     post_ann = argsdict['post_ann']
@@ -124,23 +124,35 @@ def main():
         if f.endswith('.dat'):
             files.append(f.split('.')[0])
 
-    sig_map, lbl_map, max_samples, beats = get_db_info(path_db, files, sig_list, pre_ann, post_ann, max_sample, pad_random)
+    while len(files) > 0:  # TODO: Maybe make this a function?
+        record_files = files
+        sig_str = signals_str
 
-    if len(sig_map) == 0 or len(lbl_map) == 0:
-        print('No signals found!')
-        exit()
+        if gen_records:
+            record_files = files.pop()
+            sig_str = '{}_{}'.format(signals_str, record_files)
 
-    db_info_to_csv(path_ds, db_name, signals_str, sig_map, lbl_map, max_samples, beats)
+        sig_map, lbl_map, max_samples, beats = get_db_info(path_db, record_files, sig_list, pre_ann, post_ann, max_sample, pad_random)
 
-    del sig_map
+        if len(sig_map) == 0 or len(lbl_map) == 0:
+            print('No signals found!')
+            exit()
 
-    # Convert to numpy array for easy manipulation.
-    beats = np.array(beats)
+        db_info_to_csv(path_ds, db_name, sig_str, sig_map, lbl_map, max_samples, beats)
 
-    if is_balanced:
-        gen_balanced_dataset(lbl_map, beats, argsdict)
-    else:
-        gen_dataset(lbl_map, beats, argsdict)
+        del sig_map
+        del max_samples
+
+        # Convert to numpy array for easy manipulation.
+        beats = np.array(beats)
+
+        if is_balanced:
+            gen_balanced_dataset(lbl_map, beats, argsdict)
+        else:
+            gen_dataset(lbl_map, beats, argsdict)
+
+        if not gen_records:
+            files = []  # Either this or break?
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -152,7 +164,9 @@ def gen_dataset(lbl_map, beats, argsdict):
     img_pixels = argsdict['pixels']
     dataset_len = argsdict['dataset_len']
     signals_str = argsdict['signals_str']
+
     db_name = argsdict['db']
+    path_db = '{}db/{}/'.format(argsdict['path'], db_name)
     path_ds = argsdict['path_ds']
 
     if dataset_len == 0:
@@ -183,14 +197,14 @@ def gen_dataset(lbl_map, beats, argsdict):
 
     # Finally delete beats not in pad_list
     # beats = np.delete(beats, list(delete_indices))
+    del beats
 
     # Randomize beats so they are in no particular order
     dataset_beats = np.array(dataset_beats)
     np.random.shuffle(dataset_beats)
 
-    if pad_random:
-        # Deal with padding
-        dataset_beats = randomize_beats(dataset_beats, [])
+    # Fill signals
+    dataset_beats = get_signals(path_db, dataset_beats, pad_random, [])
 
     # To save memory we do signals first then images.
     if gen_signals:
@@ -226,6 +240,7 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
     nb_datasets = argsdict['nb_datasets']
     signals_str = argsdict['signals_str']
     db_name = argsdict['db']
+    path_db = '{}db/{}/'.format(argsdict['path'], db_name)
     path_ds = argsdict['path_ds']
 
     nb_beats = [0] * len(lbl_map)
@@ -266,19 +281,19 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
         test_beats = []
         if gen_test:
             # Generate test dataset beats.
-            nb_test_rows = int(round(nb_beats[0] * percent_test))
+            nb_test_rows = int(round(min(nb_beats[0] * percent_test, nb_rows * percent_test)))
 
             lbl_map, test_beats, test_indices = get_balanced_beats(lbl_map, beats, nb_test_rows, pad_list)
-            
-            if pad_random:
-                test_beats = randomize_beats(test_beats, pad_list)
+
+            # Fill signals
+            test_beats = get_signals(path_db, test_beats, pad_random, pad_list)
 
         # Generate train dataset beats.
         nb_train_rows = nb_rows - nb_test_rows
         lbl_map, train_beats, train_indices = get_balanced_beats(lbl_map, beats, nb_train_rows, pad_list)
-        
-        if pad_random:
-            train_beats = randomize_beats(train_beats, pad_list)
+
+        # Fill signals
+        train_beats = get_signals(path_db, train_beats, pad_random, pad_list)
 
         # To save memory we do signals first then images.
         if gen_signals:
@@ -327,32 +342,38 @@ def gen_balanced_dataset(lbl_map, beats, argsdict):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def randomize_beats(beats, pad_list):
-    rand_beats = np.empty(beats.shape[0], dtype=object)
-    for idx, b in enumerate(tqdm(beats, mininterval=2.0, desc='Randomizing beats')):
-        sig_len = len(b.signal)
-        pad_len = b.pad
+def get_signals(path_db, beats, pad_random, pad_list):
+    sig_beats = np.empty(beats.shape[0], dtype=object)
+    recs = {}
+    for idx, b in enumerate(tqdm(beats, mininterval=2.0, desc='Grabbing signals')):
+        pad_floor = int(floor(b.pad / 2))
+        pad_ceil = int(ceil(b.pad / 2))
+        
+        start = b.start
+        end = b.end
 
-        if b.lbl_char in pad_list:  # Create a random shift in signal
-            # shift = random.randint(0, pad_len)
-            # start = pad_len - shift
-            # end = sig_len - shift
+        # Create a random shift in signal
+        if pad_random and b.lbl_char in pad_list:
+            # shift = random.randint(0, int(round(pad_len / 2)))
+            # start -= shift
+            # end += shift)
 
-            start = random.randint(0, int(floor(pad_len / 2)))
-            end = sig_len - random.randint(0, int(ceil(pad_len / 2)))
+            start -= random.randint(0, pad_floor)
+            end += random.randint(0, pad_ceil)
 
-        else:  # Strip pad from class that doesn't need it.
-            start = int(floor(pad_len / 2))
-            end = sig_len - int(ceil(pad_len / 2))
+        # Open record file for signal extraction.
+        if b.rec_name not in recs:
+            recs[b.rec_name] = pywfdb.Record(path_db + b.rec_name)
 
-        pad_beat = deepcopy(b)
-        pad_beat.signal = b.signal[start:end]
-        rand_beats[idx] = pad_beat
+        # Read in the signal from the record.
+        signal = recs[b.rec_name].read(b.sig_name, start, end - start)
 
-        # signal = b.signal[start:end]
-        # rand_beats[idx] = Beat(b.rec_name, b.sig_name, b.ann_idx, b.start, b.end, b.lbl_char, b.lbl_onehot, signal, b.pad)
+        sig_beats[idx] = Beat(b.rec_name, b.sig_name, b.ann_idx, b.start, b.end, b.lbl_char, b.lbl_onehot, signal, b.pad)
 
-    return rand_beats
+    for rec in recs:
+        recs[rec].close()
+
+    return sig_beats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -600,16 +621,10 @@ def get_db_info(path_db, rec_list, sig_list, pre_ann, post_ann, max_sample, pad_
                             pad_floor = int(floor(pad / 2))
                             pad_ceil = int(ceil(pad / 2))
 
-                            if pad_start - pad_floor < 0 or pad_end + pad_ceil > rec_len:
+                            if pad_start - pad_floor < 0 or pad_end + pad_ceil >= rec_len:
                                 pad = 0
-                            else:
-                                pad_start -= pad_floor
-                                pad_end += pad_ceil
 
-                # Read in the signal from the record.
-                signal = rec.read(sig_name, pad_start, pad_end - pad_start)
-
-                beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl_char, get_annotation_onehot(ann), signal, pad)
+                beat = Beat(rec_name, sig_name, ann_idx, start, end, lbl_char, get_annotation_onehot(ann), [], pad)
                 beats.append(beat)
                 beat_idx = len(beats) - 1
 
@@ -746,6 +761,21 @@ def get_annotation_onehot(ann):
     elif ann.type == 5 or ann.type == 10:
         return [0., 0., 1., 0.]
     elif ann.type == 6:
+        return [0., 0., 0., 1.]
+    else:
+        return None
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Get annotation (label) as one-hot
+def get_annotation_onehot(label):
+    if label == 'N':
+        return [1., 0., 0., 0.]
+    elif label == 'S':
+        return [0., 1., 0., 0.]
+    elif label == 'V':
+        return [0., 0., 1., 0.]
+    elif label == 'S':
         return [0., 0., 0., 1.]
     else:
         return None
