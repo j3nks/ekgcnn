@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras.layers.convolutional import Convolution2D, MaxPooling2D, ZeroPadding2D
+from keras.layers.pooling import GlobalAveragePooling2D, GlobalMaxPooling2D
+
 from keras.layers.core import Dense, Dropout, Activation, Flatten
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential
@@ -72,33 +74,14 @@ def main():
         exit()
 
     train_files = deque()
-    x_test = None
+    is_test_present = False
     x_val = None
-    # Get the test files first.
+    # Get the train files first.
     for f in os.listdir(path_dataset):
         if f.endswith('.npz') or f.endswith('.npy'):
-            if f == test_file:
-                print('Opening/uncompressing test dataset...')
-                ds = np.load(path_dataset + f)
-
-                if 'x_test' in ds:
-                    x_test = ds['x_test']
-                    y_test = ds['y_test']
-
-                    # Check for train dataset to add to list:
-                    if 'x_train' in ds:
-                        train_files.append(f)
-
-                elif 'x_train' in ds:
-                    x_test = ds['x_train']
-                    y_test = ds['y_train']
-
-                ds.close()
-
-            elif f == val_file:
+            ds = np.load(path_dataset + f)
+            if f == val_file or val_file == test_file:
                 print('Opening/uncompressing val dataset...')
-                ds = np.load(path_dataset + f)
-
                 if 'x_test' in ds:
                     x_val = ds['x_test']
                     y_val = ds['y_test']
@@ -106,29 +89,39 @@ def main():
                     x_val = ds['x_train']
                     y_val = ds['y_train']
 
-                ds.close()
+            elif f == test_file:
+                # Check for train dataset to add to list:
+                if 'x_train' in ds:
+                    train_files.append(f)
+
+                is_test_present = True
+                continue
+
             else:
                 train_files.append(f)
 
+            ds.close()
+
     if test_file == '' and len(train_files) == 1:
-        print('Opening/uncompressing val dataset...')
-        ds = np.load(path_dataset + train_files[0])
+        test_file = train_files[0]
+        is_test_present = True
 
-        if 'x_test' in ds:
-            x_test = ds['x_test']
-            y_test = ds['y_test']
-
-        ds.close()    	 
-
-    if x_test is None:
+    if not is_test_present:
         print('Test file not found: {}!'.format(test_file))
         exit()
 
-    if val_file == test_file:
-        x_val = x_test
-        y_val = y_test
+    ds = np.load(path_dataset + test_file)
+    if 'x_test' in ds:
+        img_rows = img_cols = int(sqrt(ds['x_test'].shape[1]))
+    elif 'x_train' in ds:
+        img_rows = img_cols = int(sqrt(ds['x_train'].shape[1]))
+    ds.close()
 
-    img_rows = img_cols = int(sqrt(x_test.shape[1]))
+    if x_val is not None:
+        print('X_val shape:', x_val.shape)
+        print('Y_val shape:', y_val.shape)
+
+        x_val = x_val.reshape(x_val.shape[0], img_channels, img_rows, img_cols)
 
     # ------------------------------------------------------------------------------------------------------------------
     # Get Model and Compile
@@ -144,6 +137,14 @@ def main():
         model = get_alexnet_model(img_rows, img_cols)
     else:
         model = get_simple_cnn(img_rows, img_cols)
+
+    # Plot model
+    plot(model, to_file='{}{}_plot.png'.format(path_dataset, model_str), show_shapes=True)
+
+    # Save model as JSON
+    json_string = model.to_json()
+    with open('{}{}_model.json'.format(path_dataset, model_str), 'w') as model_file:
+        model_file.write(json_string)
 
     sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
     # model.compile(loss='categorical_crossentropy', optimizer=sgd, metrics=['accuracy'])
@@ -171,17 +172,6 @@ def main():
             height_shift_range=0.1,  # randomly shift images vertically (fraction of total height)
             horizontal_flip=False,  # randomly flip images
             vertical_flip=True)  # randomly flip images
-
-    print('X_test shape:', x_test.shape)
-    print('Y_test shape:', y_test.shape)
-
-    x_test = x_test.reshape(x_test.shape[0], img_channels, img_rows, img_cols)
-
-    if x_val is not None:
-        print('X_val shape:', x_val.shape)
-        print('Y_val shape:', y_val.shape)
-
-        x_val = x_val.reshape(x_val.shape[0], img_channels, img_rows, img_cols)
     
     if join_train:
         print('Opening/uncompressing and joining train dataset...')
@@ -191,7 +181,7 @@ def main():
         print('X_train shape:', x_train.shape)
         print('Y_train shape:', y_train.shape)
 
-        history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
+        history = train_model(model, x_train, y_train, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
     else:
         for i, f in enumerate(train_files):
             if f.endswith('.npz') or f.endswith('.npy'):
@@ -215,31 +205,49 @@ def main():
             print('X_train shape:', x_train.shape)
             print('Y_train shape:', y_train.shape)
 
-            history = train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
+            history = train_model(model, x_train, y_train, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size, nb_epoch)
 
     # ------------------------------------------------------------------------------------------------------------------
     # Load most accurate weights back into model from file.
     model.load_weights('{}{}_weights.hdf5'.format(path_dataset, model_str))
 
-    # Plot model
-    plot(model, to_file='{}{}_plot.png'.format(path_dataset, model_str), show_shapes=True)
+    del x_train
+    del y_train
 
-    # Model as JSON
-    json_string = model.to_json()
-    open('{}{}_model.json'.format(path_dataset, model_str), 'w').write(json_string)
-    
-    evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_test)
+    print('Opening/uncompressing test dataset...')
+    if val_file == test_file:
+        x_test = x_val
+        y_test = y_val
+
+    else:
+        ds = np.load(path_dataset + test_file)
+
+        if 'x_test' in ds:
+            x_test = ds['x_test']
+            y_test = ds['y_test']
+
+        elif 'x_train' in ds:
+            x_test = ds['x_train']
+            y_test = ds['y_train']
+
+        ds.close()
+
+    print('X_test shape:', x_test.shape)
+    print('Y_test shape:', y_test.shape)
+
+    x_test = x_test.reshape(x_test.shape[0], img_channels, img_rows, img_cols)
+
+    evaluate_model(path_dataset, model_str, history, model, x_test, y_test)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def evaluate_model(path_dataset, model_str, history, model, y_train, x_test, y_test):
+def evaluate_model(path_dataset, model_str, history, model, x_test, y_test):
     """
     Evaluate the model and print results.
     :param path_dataset:
     :param model_str:
     :param history:
     :param model:
-    :param y_train:
     :param x_test:
     :param y_test:
     :return:
@@ -397,14 +405,12 @@ def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion Matrix'
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
+def train_model(model, x_train, y_train, x_val, y_val, img_channels, img_rows, img_cols, callbacks, data_augmentation, batch_size=32, nb_epoch=30, datagen=None):
     """
     Trains the Model with the given list of train files.
     :param model:
     :param x_train:
     :param y_train:
-    :param x_test:
-    :param y_test:
     :param x_val:
     :param y_val:
     :param img_channels:
@@ -430,10 +436,6 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
     # Reshape for Keras
     x_train = x_train.reshape(x_train.shape[0], img_channels, img_rows, img_cols)
 
-    # if x_val is None:
-    #     x_val = x_test
-    #     y_val = y_test
-
     if not data_augmentation:
         print('Not using data augmentation.')
         history = model.fit(x_train, y_train,
@@ -442,7 +444,7 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
                             validation_data=(x_val, y_val),
                             # validation_split=0.2,
                             # shuffle='batch',
-                            shuffle=False,
+                            shuffle=True,
                             verbose=1,
                             callbacks=callbacks)
     else:
@@ -457,7 +459,7 @@ def train_model(model, x_train, y_train, x_test, y_test, x_val, y_val, img_chann
                                                    batch_size=batch_size),
                                       samples_per_epoch=x_train.shape[0],
                                       nb_epoch=nb_epoch,
-                                      validation_data=(x_test, y_test),
+                                      validation_data=(x_val, y_val),
                                       shuffle=False,
                                       verbose=1,
                                       callbacks=callbacks)
@@ -512,7 +514,7 @@ def join_dataset(path_dataset, files):
 # ----------------------------------------------------------------------------------------------------------------------
 def get_simple_cnn(img_rows, img_cols, img_channels=1, nb_classes=4):
     """
-    Get VGG like model.
+    Get Simple model.
     :param img_channels: Number of image channels in image dataset.  (Grayscale = 1)
     :param img_rows: Number of rows in image dataset.
     :param img_cols: Number of cols in image dataset.
